@@ -115,15 +115,26 @@ export class FoundryClient {
   }
 
   /**
+   * Split a configured hostname into host + optional route prefix
+   * (e.g. "rpg.example.com/star-wars" -> { host, base: "/star-wars" }).
+   */
+  private splitHost(hostname: string): { host: string; base: string } {
+    const i = hostname.indexOf("/");
+    if (i < 0) return { host: hostname, base: "" };
+    return { host: hostname.slice(0, i), base: hostname.slice(i).replace(/\/$/, "") };
+  }
+
+  /**
    * Perform GET /join to retrieve or generate a session cookie
    */
   private async getSession(hostname: string): Promise<string> {
+    const { host, base } = this.splitHost(hostname);
     return new Promise((resolve, reject) => {
       const req = this.https.request(
         {
-          hostname,
+          hostname: host,
           port: 443,
-          path: "/join",
+          path: base + "/join",
           method: "GET",
         },
         (res) => {
@@ -151,11 +162,12 @@ export class FoundryClient {
     return new Promise((resolve, reject) => {
       const payload = buildJoinPayload(credential);
 
+      const { host, base } = this.splitHost(hostname);
       const req = this.https.request(
         {
-          hostname,
+          hostname: host,
           port: 443,
-          path: "/join",
+          path: base + "/join",
           method: "POST",
           headers: {
             "Content-Type": "application/json",
@@ -202,7 +214,8 @@ export class FoundryClient {
    */
   private connectWebSocket(hostname: string, sessionId: string): Promise<WebSocket> {
     return new Promise((resolve, reject) => {
-      const wsUrl = `wss://${hostname}/socket.io/?session=${sessionId}&EIO=4&transport=websocket`;
+      const { host: wsHost, base: wsBase } = this.splitHost(hostname);
+      const wsUrl = `wss://${wsHost}${wsBase}/socket.io/?session=${sessionId}&EIO=4&transport=websocket`;
       this.logger.error(`[FoundryClient] Connecting to WebSocket: ${wsUrl}`);
 
       const ws = new this.WebSocketCtor(wsUrl);
@@ -952,9 +965,9 @@ export class FoundryClient {
     return new Promise((resolve, reject) => {
       const req = this.https.request(
         {
-          hostname: this.connection!.hostname,
+          hostname: this.splitHost(this.connection!.hostname).host,
           port: 443,
-          path: "/upload",
+          path: this.splitHost(this.connection!.hostname).base + "/upload",
           method: "POST",
           headers: {
             "Content-Type": `multipart/form-data; boundary=${boundary}`,

@@ -57,15 +57,24 @@ server.setRequestHandler(CallToolRequestSchema, createToolHandler(foundryClient)
 
 // Start the server
 async function main() {
-  // Connect to FoundryVTT first
-  console.error("Connecting to FoundryVTT...");
-  await foundryClient.connect();
-  console.error(`Connected to FoundryVTT at ${foundryClient.getHostname()}`);
-
-  // Start the MCP server
+  // Start the MCP server FIRST: tools/list must answer even if Foundry is
+  // down (hosted deployments) — tool calls fail gracefully until connected.
   const transport = new StdioServerTransport();
   await server.connect(transport);
   console.error("FoundryVTT MCP server running on stdio");
+
+  // Connect to FoundryVTT in the background, retrying forever.
+  const tryConnect = async (): Promise<void> => {
+    try {
+      console.error("Connecting to FoundryVTT...");
+      await foundryClient.connect();
+      console.error(`Connected to FoundryVTT at ${foundryClient.getHostname()}`);
+    } catch (error) {
+      console.error(`FoundryVTT connection failed (retry in 30s): ${error}`);
+      setTimeout(() => { void tryConnect(); }, 30000);
+    }
+  };
+  void tryConnect();
 }
 
 main().catch((error) => {
