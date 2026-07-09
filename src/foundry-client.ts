@@ -526,7 +526,7 @@ export class FoundryClient {
 
   private async sendModifyDocumentRequest(
     type: string,
-    action: "update" | "create" | "delete",
+    action: "update" | "create" | "delete" | "get",
     operation: Record<string, unknown>,
     timeoutMessage: string,
     isMatch: (responseData: Record<string, unknown>) => boolean,
@@ -762,7 +762,7 @@ export class FoundryClient {
   async createDocument(
     type: string,
     data: Record<string, unknown>[],
-    options?: { parentUuid?: string; pack?: string }
+    options?: { parentUuid?: string; pack?: string; keepId?: boolean }
   ): Promise<Record<string, unknown>> {
     // Build operation object with optional parentUuid
     const operation = buildDocumentOperation(
@@ -770,6 +770,7 @@ export class FoundryClient {
         pack: options?.pack || null,
         data,
         action: "create",
+        keepId: options?.keepId === true,
         modifiedTime: this.now(),
         renderSheet: true,
         render: true,
@@ -785,6 +786,48 @@ export class FoundryClient {
       (responseData) => responseData.action === "create",
       "createDocument"
     );
+  }
+
+  /**
+   * Read documents from a compendium pack (socket "modifyDocument" with action "get").
+   * @param type - The primary document type of the pack (e.g., "JournalEntry", "Item")
+   * @param pack - The compendium pack ID (e.g., "world.my-compendium")
+   * @param options.query - Foundry query object to filter documents (default: all)
+   * @param options.requestedFields - Field names to keep (always keeps _id and name)
+   * @param options.maxLength - Maximum bytes for the JSON response
+   * @returns Array of document objects from the pack
+   */
+  async getPackDocuments(
+    type: string,
+    pack: string,
+    options?: {
+      query?: Record<string, unknown> | null;
+      requestedFields?: string[] | null;
+      maxLength?: number | null;
+    }
+  ): Promise<Record<string, unknown>[]> {
+    const response = await this.sendModifyDocumentRequest(
+      type,
+      "get",
+      {
+        query: options?.query ?? {},
+        pack,
+        action: "get",
+        broadcast: false,
+        index: false,
+      },
+      `Timeout waiting for getPackDocuments response (30s) for ${pack}`,
+      (responseData) => responseData.action === "get",
+      "getPackDocuments"
+    );
+    if (response.error) {
+      throw new Error(
+        `Foundry error reading pack ${pack}: ${JSON.stringify(response.error)}`
+      );
+    }
+    let docs = (response.result as Record<string, unknown>[]) ?? [];
+    docs = docs.map((doc) => filterDocumentFields(doc, options?.requestedFields ?? null));
+    return truncateDocuments(docs, options?.maxLength ?? 0);
   }
 
   /**

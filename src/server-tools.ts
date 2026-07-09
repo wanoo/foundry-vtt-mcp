@@ -157,8 +157,45 @@ The exact field structure depends on the game system. Use the get_* tools first 
         type: "string",
         description: `Optional. The compendium pack ID to create the document in (e.g., "world.my-compendium"). If not provided, the document is created in the world. Use this to add documents directly to a compendium.`,
       },
+      keep_id: {
+        type: "boolean",
+        description: `Optional. If true, preserve the "_id" fields provided in the data objects (and in embedded documents such as journal pages) instead of generating new ids. Useful to keep @UUID links valid when re-importing documents.`,
+      },
     },
     required: ["type", "data"],
+  },
+};
+
+export const getPackDocumentsTool = {
+  name: "get_pack_documents",
+  description: `Read documents from a compendium pack. Unlike the get_* tools (which only read world collections), this reads the contents of a compendium (e.g., "world.my-compendium"). Returns full documents unless requested_fields is provided.`,
+  inputSchema: {
+    type: "object",
+    properties: {
+      type: {
+        type: "string",
+        description: `The primary document type of the pack (e.g., "JournalEntry", "Item", "Actor", "RollTable", "Macro"). Must match the pack's declared type.`,
+      },
+      pack: {
+        type: "string",
+        description: `The compendium pack ID to read (e.g., "world.my-compendium").`,
+      },
+      query: {
+        type: "object",
+        additionalProperties: true,
+        description: `Optional Foundry query object to filter documents (e.g., {"name": "My Entry"}). Default: all documents.`,
+      },
+      requested_fields: {
+        type: "array",
+        items: { type: "string" },
+        description: `Optional. Field names to include in each document (always includes _id and name). Use ["_id","name"] for a light index.`,
+      },
+      max_length: {
+        type: "number",
+        description: `Optional. Maximum bytes for the JSON response; documents are dropped until under the limit.`,
+      },
+    },
+    required: ["type", "pack"],
   },
 };
 
@@ -337,6 +374,7 @@ export function createToolDefinitions() {
     modifyDocumentTool,
     createDocumentTool,
     deleteDocumentTool,
+    getPackDocumentsTool,
     showCredentialsTool,
     chooseFoundryInstanceTool,
     uploadFileTool,
@@ -472,6 +510,7 @@ export function createToolHandler(foundryClient: FoundryClient) {
         const data = args?.data as Record<string, unknown>[] | undefined;
         const parentUuid = args?.parent_uuid as string | undefined;
         const pack = args?.pack as string | undefined;
+        const keepId = args?.keep_id === true;
 
         if (!type) {
           return errorResponse("Error: 'type' is required");
@@ -480,11 +519,39 @@ export function createToolHandler(foundryClient: FoundryClient) {
           return errorResponse("Error: 'data' must be an array of objects");
         }
 
-        const result = await foundryClient.createDocument(type, data, { parentUuid, pack });
+        const result = await foundryClient.createDocument(type, data, { parentUuid, pack, keepId });
         return successResponse(result);
       } catch (error) {
         return errorResponse(
           `Error creating document: ${error instanceof Error ? error.message : String(error)}`
+        );
+      }
+    }
+
+    if (name === "get_pack_documents") {
+      try {
+        const type = args?.type as string | undefined;
+        const pack = args?.pack as string | undefined;
+        const query = (args?.query as Record<string, unknown> | undefined) ?? null;
+        const requestedFields = (args?.requested_fields as string[] | undefined) ?? null;
+        const maxLength = (args?.max_length as number | undefined) ?? null;
+
+        if (!type) {
+          return errorResponse("Error: 'type' is required");
+        }
+        if (!pack) {
+          return errorResponse("Error: 'pack' is required");
+        }
+
+        const result = await foundryClient.getPackDocuments(type, pack, {
+          query,
+          requestedFields,
+          maxLength,
+        });
+        return successResponse(result);
+      } catch (error) {
+        return errorResponse(
+          `Error reading pack documents: ${error instanceof Error ? error.message : String(error)}`
         );
       }
     }
