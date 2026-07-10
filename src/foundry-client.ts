@@ -283,41 +283,40 @@ export class FoundryClient {
     if (!this.connection || this.reconnecting) return;
 
     this.reconnecting = true;
-    const { hostname, credential, sessionId } = this.connection;
+    const { hostname, credential } = this.connection;
 
     this.logger.error("[FoundryClient] Attempting to reconnect...");
 
-    try {
-      // Try to re-authenticate first
-      const success = await this.authenticate(hostname, sessionId, credential);
-      if (success) {
-        const ws = await this.connectWebSocket(hostname, sessionId);
-        this.setupWebSocketHandlers(ws);
-        this.connection.ws = ws;
-        this.logger.error("[FoundryClient] Reconnection successful");
-      } else {
-        // Session may have expired, try full reconnect with new session
-        const newSessionId = await this.getSession(hostname);
-        const newSuccess = await this.authenticate(
-          hostname,
-          newSessionId,
-          credential
-        );
-        if (newSuccess) {
-          const ws = await this.connectWebSocket(hostname, newSessionId);
+    // Retry forever with exponential backoff: the world may be down for a while
+    // (server restart, world switched back to setup). A one-shot attempt would
+    // leave the client permanently disconnected once the world comes back.
+    let delayMs = 5_000;
+    for (;;) {
+      try {
+        // Always start from a fresh session: covers both expired sessions and
+        // full server restarts.
+        const sessionId = await this.getSession(hostname);
+        const success = await this.authenticate(hostname, sessionId, credential);
+        if (success) {
+          const ws = await this.connectWebSocket(hostname, sessionId);
           this.setupWebSocketHandlers(ws);
-          this.connection.sessionId = newSessionId;
+          this.connection.sessionId = sessionId;
           this.connection.ws = ws;
-          this.logger.error("[FoundryClient] Reconnection with new session successful");
-        } else {
-          this.logger.error("[FoundryClient] Reconnection failed - authentication failed");
+          this.logger.error("[FoundryClient] Reconnection successful");
+          break;
         }
+        this.logger.error(
+          `[FoundryClient] Reconnection auth failed - retrying in ${delayMs}ms`
+        );
+      } catch (error) {
+        this.logger.error(
+          `[FoundryClient] Reconnection attempt failed: ${error} - retrying in ${delayMs}ms`
+        );
       }
-    } catch (error) {
-      this.logger.error(`[FoundryClient] Reconnection failed: ${error}`);
-    } finally {
-      this.reconnecting = false;
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+      delayMs = Math.min(delayMs * 2, 60_000);
     }
+    this.reconnecting = false;
   }
 
   /**
