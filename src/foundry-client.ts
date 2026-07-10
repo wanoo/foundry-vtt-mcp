@@ -261,6 +261,15 @@ export class FoundryClient {
     ws.on("message", (data) => {
       const message = data.toString();
       this.wsLogger.logInbound(message);
+
+      // Engine.IO heartbeat: the server pings ("2") every pingInterval and
+      // closes the socket after pingTimeout without a pong ("3"). Without this
+      // the connection silently dies every ~10 minutes.
+      if (message === "2") {
+        this.sendWebSocketMessage(ws, "3");
+        return;
+      }
+
       this.logger.error(`[FoundryClient] WebSocket message: ${message}`);
 
       if (isEngineHandshake(message)) {
