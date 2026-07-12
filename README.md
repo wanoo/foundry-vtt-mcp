@@ -14,6 +14,10 @@ This server **natively authenticates** with FoundryVTT and exchanges WebSocket m
 - **Zero server-side setup** - No modules to install on your Foundry instance
 - **Secure** - Uses the same authentication flow as the official client
 
+## Compatibility
+
+Works with **FoundryVTT v13 and v14**. The server detects the Foundry generation automatically (via `GET /api/status`) and uses the correct session-binding method for that version — v14 changed how the WebSocket session is authenticated, and both are handled transparently with no configuration needed.
+
 ## Security Recommendation
 
 **Create a dedicated FoundryVTT user for each game world you want the MCP server to access.** Grant that user only the permissions you want the MCP server to have. This provides:
@@ -335,10 +339,11 @@ When working with large worlds, use `max_length` and `requested_fields` to limit
 
 ## How It Works
 
-1. **Authentication**: The server authenticates with FoundryVTT using the same HTTP POST flow as the official client
-2. **WebSocket Connection**: Establishes a persistent WebSocket connection using Socket.IO protocol
-3. **Message Exchange**: Sends and receives JSON messages using Foundry's native protocol
-4. **Automatic Reconnection**: Handles connection drops and re-authenticates as needed
+1. **Version detection**: Queries `/api/status` to detect the Foundry generation (v13 vs v14), which determines how the session binds to the socket
+2. **Authentication**: Authenticates with FoundryVTT using the same HTTP POST flow as the official client
+3. **WebSocket Connection**: Establishes a persistent Socket.IO/Engine.IO connection, binding the session the way that version expects (query parameter on v13, session cookie on v14), then waits for Foundry to confirm the bound session before issuing requests
+4. **Message Exchange**: Exchanges JSON messages using Foundry's native protocol, replying to Engine.IO keepalive pings to hold the connection open
+5. **Automatic Reconnection**: Handles connection drops and re-authenticates as needed
 
 ## License
 

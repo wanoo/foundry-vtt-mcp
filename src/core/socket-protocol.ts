@@ -1,11 +1,62 @@
 export const WORLD_REQUEST_MESSAGE = '420["world"]';
 
+/** Engine.IO ping frame (server -> client). */
+export const ENGINE_PING = "2";
+/** Engine.IO pong frame (client -> server) sent in reply to a ping. */
+export const ENGINE_PONG = "3";
+
 export function isEngineHandshake(message: string): boolean {
   return message.startsWith("0{");
 }
 
+export function isEnginePing(message: string): boolean {
+  return message === ENGINE_PING;
+}
+
 export function isSessionEvent(message: string): boolean {
   return message.includes('["session",');
+}
+
+export interface SessionPayload {
+  matched: boolean;
+  sessionId: string | null;
+  userId: string | null;
+}
+
+/**
+ * Parse a Foundry `session` event: `42["session", <payload>]` where the payload
+ * is either `null` (socket not bound to a user) or `{ sessionId, userId }`.
+ * A non-null `sessionId` means the socket is bound and ready for data requests.
+ */
+export function parseSessionPayload(message: string): SessionPayload {
+  const jsonStart = message.indexOf("[");
+  if (jsonStart === -1) {
+    return { matched: false, sessionId: null, userId: null };
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(message.slice(jsonStart));
+  } catch {
+    return { matched: false, sessionId: null, userId: null };
+  }
+
+  if (!Array.isArray(parsed) || parsed[0] !== "session") {
+    return { matched: false, sessionId: null, userId: null };
+  }
+
+  const payload = parsed[1];
+  if (payload && typeof payload === "object") {
+    const record = payload as Record<string, unknown>;
+    return {
+      matched: true,
+      sessionId: typeof record.sessionId === "string" ? record.sessionId : null,
+      userId: typeof record.userId === "string" ? record.userId : null,
+    };
+  }
+
+  // 42["session",null] — matched, but the socket was not bound to a user.
+  return { matched: true, sessionId: null, userId: null };
 }
 
 export function parseWorldResponseMessage(message: string): {

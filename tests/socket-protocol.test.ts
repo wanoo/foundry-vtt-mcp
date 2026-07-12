@@ -1,8 +1,12 @@
 import {
   buildModifyDocumentMessage,
+  ENGINE_PING,
+  ENGINE_PONG,
   isEngineHandshake,
+  isEnginePing,
   isSessionEvent,
   parseAckMessage,
+  parseSessionPayload,
   parseWorldResponseMessage,
   WORLD_REQUEST_MESSAGE,
 } from "../src/core/socket-protocol.js";
@@ -24,6 +28,44 @@ describe("socket protocol", () => {
       .toBe(true);
     expect(isSessionEvent("42[\"other\"]"))
       .toBe(false);
+  });
+
+  test("Engine.IO ping/pong constants and detection", () => {
+    expect(ENGINE_PING).toBe("2");
+    expect(ENGINE_PONG).toBe("3");
+    expect(isEnginePing("2")).toBe(true);
+    expect(isEnginePing("3")).toBe(false);
+    expect(isEnginePing("42[\"session\",null]")).toBe(false);
+    expect(isEnginePing("0{}")).toBe(false);
+  });
+
+  describe("parseSessionPayload", () => {
+    test("parses a bound session with sessionId and userId", () => {
+      const parsed = parseSessionPayload('42["session",{"sessionId":"abc","userId":"u1"}]');
+      expect(parsed).toEqual({ matched: true, sessionId: "abc", userId: "u1" });
+    });
+
+    test("matches a null session but reports no sessionId", () => {
+      const parsed = parseSessionPayload('42["session",null]');
+      expect(parsed).toEqual({ matched: true, sessionId: null, userId: null });
+    });
+
+    test("handles a numeric-prefixed session event", () => {
+      const parsed = parseSessionPayload('420["session",{"sessionId":"z"}]');
+      expect(parsed.matched).toBe(true);
+      expect(parsed.sessionId).toBe("z");
+      expect(parsed.userId).toBeNull();
+    });
+
+    test("does not match other events", () => {
+      expect(parseSessionPayload('42["userActivity","u1",{}]').matched).toBe(false);
+      expect(parseSessionPayload("40").matched).toBe(false);
+      expect(parseSessionPayload("2").matched).toBe(false);
+    });
+
+    test("does not match malformed json", () => {
+      expect(parseSessionPayload('42["session",not-json').matched).toBe(false);
+    });
   });
 
   test("parseWorldResponseMessage ignores non-world", () => {
