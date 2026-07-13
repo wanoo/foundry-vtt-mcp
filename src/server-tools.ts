@@ -414,11 +414,18 @@ export function createToolHandler(foundryClient: FoundryClient) {
           const requestedFields = args?.requested_fields as string[] | undefined;
           const where = args?.where as Record<string, unknown> | undefined;
 
-          const docs = await foundryClient.getDocuments(config.collection, {
-            maxLength: maxLength || null,
-            requestedFields: requestedFields || null,
-            where: where || null,
-          });
+          // Les settings ne sont PAS dans le snapshot world-data : lecture par socket dédiée.
+          const docs = config.collection === "settings"
+            ? await foundryClient.getSettings({
+                maxLength: maxLength || null,
+                requestedFields: requestedFields || null,
+                where: where || null,
+              })
+            : await foundryClient.getDocuments(config.collection, {
+                maxLength: maxLength || null,
+                requestedFields: requestedFields || null,
+                where: where || null,
+              });
 
           return successResponse(docs);
         } catch (error) {

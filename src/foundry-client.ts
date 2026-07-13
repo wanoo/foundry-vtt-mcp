@@ -839,6 +839,36 @@ export class FoundryClient {
   }
 
   /**
+   * Read world Setting documents (socket "modifyDocument" action "get" on type "Setting").
+   * Unlike getDocuments(), settings are NOT part of the world-data snapshot, so they must be
+   * fetched over the socket. Each document has { _id, key, value } (value is a JSON string).
+   * @param options.where - Filter by field values (AND logic), e.g. exact key match
+   * @param options.requestedFields - Field names to keep (always keeps _id and name)
+   * @param options.maxLength - Maximum bytes for the JSON response
+   */
+  async getSettings(options?: {
+    where?: Record<string, unknown> | null;
+    requestedFields?: string[] | null;
+    maxLength?: number | null;
+  }): Promise<Record<string, unknown>[]> {
+    const response = await this.sendModifyDocumentRequest(
+      "Setting",
+      "get",
+      { query: {}, action: "get", broadcast: false, index: false },
+      "Timeout waiting for getSettings response (30s)",
+      (responseData) => responseData.action === "get",
+      "getSettings"
+    );
+    if (response.error) {
+      throw new Error(`Foundry error reading settings: ${JSON.stringify(response.error)}`);
+    }
+    let docs = (response.result as Record<string, unknown>[]) ?? [];
+    docs = filterDocumentsByWhere(docs, options?.where ?? null);
+    docs = docs.map((doc) => filterDocumentFields(doc, options?.requestedFields ?? null));
+    return truncateDocuments(docs, options?.maxLength ?? 0);
+  }
+
+  /**
    * Delete a document in FoundryVTT
    * @param type - The document type (Actor, Item, Scene, JournalEntry, Folder, User, etc.)
    * @param ids - Array of document _ids to delete
