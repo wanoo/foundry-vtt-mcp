@@ -918,6 +918,65 @@ export class FoundryClient {
     );
   }
 
+  /**
+   * List the compendium packs of the world (slim index from the world dump's `packs`).
+   */
+  async listPacks(): Promise<Record<string, unknown>[]> {
+    const worldData = await this.requestWorldData();
+    const packs = (worldData.packs as Record<string, unknown>[] | undefined) ?? [];
+    return packs.map((p) => ({
+      id: p.id ?? p.collection ?? `${p.packageName ?? p.package ?? "world"}.${p.name}`,
+      label: p.label,
+      type: p.type ?? p.documentName,
+      system: p.system,
+      packageType: p.packageType ?? p.package,
+    }));
+  }
+
+  /**
+   * Full-text search across journal names and page contents (HTML stripped).
+   * Case-insensitive. Returns lightweight hits with a snippet around the match.
+   */
+  async searchJournals(
+    query: string,
+    options?: { maxResults?: number | null }
+  ): Promise<Record<string, unknown>[]> {
+    const maxResults = options?.maxResults || 20;
+    const worldData = await this.requestWorldData();
+    const journals = (worldData.journal as Record<string, unknown>[] | undefined) ?? [];
+    const needle = query.toLowerCase();
+    const strip = (html: string) => html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+    const hits: Record<string, unknown>[] = [];
+
+    for (const journal of journals) {
+      if (hits.length >= maxResults) break;
+      const jName = typeof journal.name === "string" ? journal.name : "";
+      if (jName.toLowerCase().includes(needle)) {
+        hits.push({ _id: journal._id, name: jName, match: "name" });
+      }
+      const pages = (journal.pages as Record<string, unknown>[] | undefined) ?? [];
+      for (const page of pages) {
+        if (hits.length >= maxResults) break;
+        const pName = typeof page.name === "string" ? page.name : "";
+        const content = (page.text as Record<string, unknown> | undefined)?.content;
+        const text = typeof content === "string" ? strip(content) : "";
+        const idx = text.toLowerCase().indexOf(needle);
+        if (idx >= 0) {
+          hits.push({
+            _id: journal._id,
+            name: jName,
+            match: "content",
+            page: { _id: page._id, name: pName },
+            snippet: text.slice(Math.max(0, idx - 80), idx + query.length + 80),
+          });
+        } else if (pName.toLowerCase().includes(needle)) {
+          hits.push({ _id: journal._id, name: jName, match: "page-name", page: { _id: page._id, name: pName } });
+        }
+      }
+    }
+    return hits;
+  }
+
   // Convenience methods for specific document types
   async getActors(options?: { maxLength?: number | null; requestedFields?: string[] | null }) {
     return this.getDocuments("actors", options);

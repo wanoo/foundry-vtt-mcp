@@ -42,7 +42,7 @@ export function generateListToolDefinition(config: DocumentTypeConfig) {
         where: {
           type: "object",
           additionalProperties: true,
-          description: `Filter ${config.plural} by field values. Provide key-value pairs to match. All conditions must match (AND logic). Example: {"folder": "abc123"} returns only ${config.plural} in that folder. Example: {"folder": "abc123", "type": "npc"} returns only ${config.plural} matching both conditions.`,
+          description: `Filter ${config.plural} by field values (AND logic). Keys support dotted paths into nested objects and operator suffixes: "field__in" (value must be an array), "field__contains" (case-insensitive substring, or array membership), "field__ne" (not equal), "field__exists" (true/false). Examples: {"folder": "abc123"}, {"flags.campaign-codex.type": "npc"}, {"name__contains": "riar"}, {"_id__in": ["a1", "b2"]}.`,
         },
       },
       required: [],
@@ -478,6 +478,97 @@ const pullUsersToSceneTool = {
   },
 };
 
+const searchJournalsTool = {
+  name: "search_journals",
+  description:
+    "Full-text search across journal names and page contents (HTML stripped, case-insensitive). Returns lightweight hits: journal _id/name, matching page, and a snippet around the match. Much cheaper than fetching all journals.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      query: { type: "string", description: "The text to search for" },
+      max_results: { type: "number", description: "Maximum number of hits to return (default 20)" },
+    },
+    required: ["query"],
+  },
+};
+
+const listCompendiumPacksTool = {
+  name: "list_compendium_packs",
+  description:
+    "List the compendium packs available in the world (id, label, document type, system). Use the id (e.g. \"world.my-npcs\") with get_pack_documents or import_from_compendium.",
+  inputSchema: { type: "object", properties: {} },
+};
+
+const importFromCompendiumTool = {
+  name: "import_from_compendium",
+  description:
+    "Import a document from a compendium pack into the world (like dragging it out of the compendium). Finds the document by _id or name in the pack, then creates it as a world document.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      pack: { type: "string", description: `The pack id (e.g. "world.my-npcs" or "swffg-astronav.planets")` },
+      type: { type: "string", description: `The document type stored in the pack (e.g. "Actor", "Item", "JournalEntry")` },
+      _id: { type: "string", description: "The _id of the document inside the pack" },
+      name: { type: "string", description: "The name of the document inside the pack (alternative to _id)" },
+      keep_id: { type: "boolean", description: "Preserve the pack document's _id in the world (default false)" },
+      folder: { type: "string", description: "Optional world folder _id to file the imported document into" },
+    },
+    required: ["pack", "type"],
+  },
+};
+
+const listActorOwnershipTool = {
+  name: "list_actor_ownership",
+  description:
+    "List actor ownership: which users own or can observe which actors. Without arguments, lists every actor having non-default permissions; with _id or name, details that actor. Levels: 0=none, 1=limited, 2=observer, 3=owner.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      _id: { type: "string", description: "Restrict to the actor with this _id" },
+      name: { type: "string", description: "Restrict to the actor with this name" },
+    },
+  },
+};
+
+const setActorOwnershipTool = {
+  name: "set_actor_ownership",
+  description:
+    "Grant or revoke a user's permission on an actor. Level \"none\" removes the user's specific permission (falls back to default). Use user _id or user name.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      _id: { type: "string", description: "The _id of the actor" },
+      name: { type: "string", description: "The name of the actor (alternative to _id)" },
+      user: { type: "string", description: "The user's _id or name" },
+      level: {
+        type: "string",
+        enum: ["none", "limited", "observer", "owner"],
+        description: "Permission level to grant (\"none\" revokes)",
+      },
+      default_level: {
+        type: "string",
+        enum: ["none", "limited", "observer", "owner"],
+        description: "Optionally also set the actor's DEFAULT permission (applies to all users without a specific level)",
+      },
+    },
+  },
+};
+
+const getCurrentSceneTool = {
+  name: "get_current_scene",
+  description: "Get the currently active scene (the one players see).",
+  inputSchema: {
+    type: "object",
+    properties: {
+      requested_fields: {
+        type: "array",
+        items: { type: "string" },
+        description: "Fields to include (default: a light summary — _id, name, active, navigation info)",
+      },
+    },
+  },
+};
+
 const setSettingTool = {
   name: "set_setting",
   description:
@@ -518,6 +609,12 @@ export function createToolDefinitions() {
     activateSceneTool,
     pullUsersToSceneTool,
     setSettingTool,
+    searchJournalsTool,
+    listCompendiumPacksTool,
+    importFromCompendiumTool,
+    listActorOwnershipTool,
+    setActorOwnershipTool,
+    getCurrentSceneTool,
   ];
 }
 
@@ -1011,6 +1108,178 @@ export function createToolHandler(foundryClient: FoundryClient) {
       } catch (error) {
         return errorResponse(
           `Error setting '${args?.key}': ${error instanceof Error ? error.message : String(error)}`
+        );
+      }
+    }
+
+    if (name === "search_journals") {
+      try {
+        const query = args?.query as string | undefined;
+        if (!query) {
+          return errorResponse("Error: 'query' is required");
+        }
+        const hits = await foundryClient.searchJournals(query, {
+          maxResults: (args?.max_results as number | undefined) || null,
+        });
+        return successResponse(hits);
+      } catch (error) {
+        return errorResponse(
+          `Error searching journals: ${error instanceof Error ? error.message : String(error)}`
+        );
+      }
+    }
+
+    if (name === "list_compendium_packs") {
+      try {
+        return successResponse(await foundryClient.listPacks());
+      } catch (error) {
+        return errorResponse(
+          `Error listing packs: ${error instanceof Error ? error.message : String(error)}`
+        );
+      }
+    }
+
+    if (name === "import_from_compendium") {
+      try {
+        const pack = args?.pack as string | undefined;
+        const type = args?.type as string | undefined;
+        const _id = args?._id as string | undefined;
+        const docName = args?.name as string | undefined;
+        if (!pack || !type) {
+          return errorResponse("Error: 'pack' and 'type' are required");
+        }
+        if (!_id && !docName) {
+          return errorResponse("Error: Must provide one of: _id or name");
+        }
+
+        const docs = await foundryClient.getPackDocuments(type, pack, {
+          query: _id ? { _id } : { name: docName },
+        });
+        if (!docs.length) {
+          return errorResponse(`Error: Document not found in pack ${pack}`);
+        }
+        const doc = { ...docs[0] } as Record<string, unknown>;
+        doc.folder = (args?.folder as string | undefined) ?? null;
+
+        const result = await foundryClient.createDocument(type, [doc], {
+          keepId: (args?.keep_id as boolean | undefined) ?? false,
+        });
+        return successResponse({ imported: { _id: doc._id, name: doc.name }, from: pack, result });
+      } catch (error) {
+        return errorResponse(
+          `Error importing from compendium: ${error instanceof Error ? error.message : String(error)}`
+        );
+      }
+    }
+
+    if (name === "list_actor_ownership" || name === "set_actor_ownership") {
+      try {
+        const LEVELS: Record<string, number> = { none: 0, limited: 1, observer: 2, owner: 3 };
+        const LEVEL_NAMES = ["none", "limited", "observer", "owner"];
+        const users = (await foundryClient.getDocuments("users", {
+          requestedFields: ["_id", "name"],
+        })) as Record<string, unknown>[];
+        const userName = (id: string) => (users.find((u) => u._id === id)?.name as string) ?? id;
+
+        const describeOwnership = (actor: Record<string, unknown>) => {
+          const ownership = (actor.ownership as Record<string, number> | undefined) ?? {};
+          const entries = Object.entries(ownership)
+            .filter(([k]) => k !== "default")
+            .map(([userId, level]) => ({ user: userName(userId), userId, level: LEVEL_NAMES[level] ?? level }));
+          return {
+            _id: actor._id,
+            name: actor.name,
+            default: LEVEL_NAMES[ownership.default ?? 0] ?? ownership.default,
+            users: entries,
+          };
+        };
+
+        if (name === "list_actor_ownership") {
+          const _id = args?._id as string | undefined;
+          const docName = args?.name as string | undefined;
+          if (_id || docName) {
+            const actor = await foundryClient.getDocument(
+              "actors",
+              { _id, name: docName },
+              { requestedFields: ["_id", "name", "ownership"] }
+            );
+            if (!actor) return errorResponse("Error: Actor not found");
+            return successResponse(describeOwnership(actor));
+          }
+          const actors = (await foundryClient.getDocuments("actors", {
+            requestedFields: ["_id", "name", "ownership"],
+          })) as Record<string, unknown>[];
+          const interesting = actors
+            .map(describeOwnership)
+            .filter((a) => (a.users as unknown[]).length > 0 || a.default !== "none");
+          return successResponse(interesting);
+        }
+
+        // set_actor_ownership
+        const _id = args?._id as string | undefined;
+        const docName = args?.name as string | undefined;
+        if (!_id && !docName) {
+          return errorResponse("Error: Must provide one of: _id or name (actor)");
+        }
+        const actor = await foundryClient.getDocument(
+          "actors",
+          { _id, name: docName },
+          { requestedFields: ["_id", "name", "ownership"] }
+        );
+        if (!actor) return errorResponse("Error: Actor not found");
+
+        const update: Record<string, unknown> = {};
+        const userArg = args?.user as string | undefined;
+        const level = args?.level as string | undefined;
+        if (userArg && level !== undefined) {
+          const user = users.find((u) => u._id === userArg || u.name === userArg);
+          if (!user) return errorResponse(`Error: User not found: ${userArg}`);
+          if (level === "none") {
+            update[`ownership.-=${user._id}`] = null;
+          } else {
+            update[`ownership.${user._id}`] = LEVELS[level];
+          }
+        } else if (userArg || level) {
+          return errorResponse("Error: 'user' and 'level' go together");
+        }
+        const defaultLevel = args?.default_level as string | undefined;
+        if (defaultLevel !== undefined) {
+          update["ownership.default"] = LEVELS[defaultLevel];
+        }
+        if (!Object.keys(update).length) {
+          return errorResponse("Error: Nothing to change (provide user+level and/or default_level)");
+        }
+
+        const result = await foundryClient.modifyDocument("Actor", actor._id as string, [update]);
+        return successResponse({ actor: { _id: actor._id, name: actor.name }, applied: update, result });
+      } catch (error) {
+        return errorResponse(
+          `Error on ownership operation: ${error instanceof Error ? error.message : String(error)}`
+        );
+      }
+    }
+
+    if (name === "get_current_scene") {
+      try {
+        const requestedFields = (args?.requested_fields as string[] | undefined) ?? [
+          "_id",
+          "name",
+          "active",
+          "navigation",
+          "navName",
+          "background",
+        ];
+        const scenes = (await foundryClient.getDocuments("scenes", {
+          where: { active: true },
+          requestedFields,
+        })) as Record<string, unknown>[];
+        if (!scenes.length) {
+          return successResponse({ active: null, note: "No scene is currently active" });
+        }
+        return successResponse(scenes[0]);
+      } catch (error) {
+        return errorResponse(
+          `Error fetching current scene: ${error instanceof Error ? error.message : String(error)}`
         );
       }
     }

@@ -55,4 +55,46 @@ describe("document utils", () => {
     expect(filterDocumentsByWhere(docs, { type: "npc", folder: "f1" }))
       .toEqual([{ type: "npc", folder: "f1" }]);
   });
+
+  describe("where: dotted paths and operators", () => {
+    const docs = [
+      { _id: "a", name: "Riar Starport", flags: { "campaign-codex": { type: "location" } }, folder: "f1" },
+      { _id: "b", name: "Jerserra", flags: { "campaign-codex": { type: "npc" } }, folder: null },
+      { _id: "c", name: "Halyard", flags: {}, folder: "f2" },
+    ];
+
+    test("dotted path into flags", () => {
+      expect(filterDocumentsByWhere(docs, { "flags.campaign-codex.type": "npc" }))
+        .toEqual([docs[1]]);
+    });
+
+    test("__in operator", () => {
+      expect(filterDocumentsByWhere(docs, { _id__in: ["a", "c"] })).toEqual([docs[0], docs[2]]);
+      expect(filterDocumentsByWhere(docs, { _id__in: "a" })).toEqual([]);
+    });
+
+    test("__contains operator (case-insensitive substring)", () => {
+      expect(filterDocumentsByWhere(docs, { name__contains: "riar" })).toEqual([docs[0]]);
+      expect(filterDocumentsByWhere(docs, { name__contains: "RIAR" })).toEqual([docs[0]]);
+    });
+
+    test("__ne operator", () => {
+      expect(filterDocumentsByWhere(docs, { folder__ne: null })).toEqual([docs[0], docs[2]]);
+    });
+
+    test("__exists operator", () => {
+      expect(filterDocumentsByWhere(docs, { "flags.campaign-codex__exists": true }))
+        .toEqual([docs[0], docs[1]]);
+      expect(filterDocumentsByWhere(docs, { "flags.campaign-codex__exists": false }))
+        .toEqual([docs[2]]);
+    });
+
+    test("missing path never equals a value", () => {
+      expect(filterDocumentsByWhere(docs, { "flags.nope.deep": "x" })).toEqual([]);
+    });
+
+    test("plain equality still works (rétrocompatibilité)", () => {
+      expect(filterDocumentsByWhere(docs, { folder: "f2" })).toEqual([docs[2]]);
+    });
+  });
 });

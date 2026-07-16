@@ -934,4 +934,163 @@ describe("server tools", () => {
       ]);
     });
   });
+
+  describe("lot 1 : recherche, packs, import, ownership, scène courante", () => {
+    test("createToolDefinitions includes lot 1 tools", () => {
+      const tools = createToolDefinitions();
+      for (const name of [
+        "search_journals",
+        "list_compendium_packs",
+        "import_from_compendium",
+        "list_actor_ownership",
+        "set_actor_ownership",
+        "get_current_scene",
+      ]) {
+        expect(tools.find((tool) => tool.name === name)).toBeDefined();
+      }
+    });
+
+    test("search_journals delegates to the client", async () => {
+      const client = {
+        isConnected: () => true,
+        searchJournals: jest.fn().mockResolvedValue([{ _id: "j1", match: "content" }]),
+      } as any;
+      const handler = createToolHandler(client);
+      const response = await handler({
+        params: { name: "search_journals", arguments: { query: "Jerserra", max_results: 5 } },
+      });
+      expect(client.searchJournals).toHaveBeenCalledWith("Jerserra", { maxResults: 5 });
+      expect((response as any).isError).toBeUndefined();
+    });
+
+    test("list_compendium_packs delegates to the client", async () => {
+      const client = {
+        isConnected: () => true,
+        listPacks: jest.fn().mockResolvedValue([{ id: "world.x", label: "X" }]),
+      } as any;
+      const handler = createToolHandler(client);
+      const response = await handler({ params: { name: "list_compendium_packs", arguments: {} } });
+      expect(client.listPacks).toHaveBeenCalled();
+      expect((response as any).isError).toBeUndefined();
+    });
+
+    test("import_from_compendium fetches the pack doc then creates it", async () => {
+      const client = {
+        isConnected: () => true,
+        getPackDocuments: jest.fn().mockResolvedValue([{ _id: "p1", name: "Goblin", folder: "packfolder" }]),
+        createDocument: jest.fn().mockResolvedValue({ ok: true }),
+      } as any;
+      const handler = createToolHandler(client);
+      const response = await handler({
+        params: {
+          name: "import_from_compendium",
+          arguments: { pack: "world.monsters", type: "Actor", name: "Goblin", keep_id: true, folder: "f9" },
+        },
+      });
+      expect(client.getPackDocuments).toHaveBeenCalledWith("Actor", "world.monsters", {
+        query: { name: "Goblin" },
+      });
+      expect(client.createDocument).toHaveBeenCalledWith(
+        "Actor",
+        [{ _id: "p1", name: "Goblin", folder: "f9" }],
+        { keepId: true }
+      );
+      expect((response as any).isError).toBeUndefined();
+    });
+
+    test("import_from_compendium errors when doc missing", async () => {
+      const client = {
+        isConnected: () => true,
+        getPackDocuments: jest.fn().mockResolvedValue([]),
+      } as any;
+      const handler = createToolHandler(client);
+      const response = await handler({
+        params: { name: "import_from_compendium", arguments: { pack: "world.x", type: "Actor", name: "Nope" } },
+      });
+      expect((response as any).isError).toBe(true);
+    });
+
+    test("list_actor_ownership resolves user names", async () => {
+      const client = {
+        isConnected: () => true,
+        getDocuments: jest.fn().mockResolvedValue([{ _id: "u1", name: "Edeker" }]),
+        getDocument: jest.fn().mockResolvedValue({
+          _id: "a1",
+          name: "Uchebe",
+          ownership: { default: 0, u1: 3 },
+        }),
+      } as any;
+      const handler = createToolHandler(client);
+      const response = await handler({
+        params: { name: "list_actor_ownership", arguments: { name: "Uchebe" } },
+      });
+      const body = JSON.parse((response as any).content[0].text);
+      expect(body).toEqual({
+        _id: "a1",
+        name: "Uchebe",
+        default: "none",
+        users: [{ user: "Edeker", userId: "u1", level: "owner" }],
+      });
+    });
+
+    test("set_actor_ownership grants a level", async () => {
+      const client = {
+        isConnected: () => true,
+        getDocuments: jest.fn().mockResolvedValue([{ _id: "u1", name: "Edeker" }]),
+        getDocument: jest.fn().mockResolvedValue({ _id: "a1", name: "Uchebe", ownership: { default: 0 } }),
+        modifyDocument: jest.fn().mockResolvedValue({ ok: true }),
+      } as any;
+      const handler = createToolHandler(client);
+      const response = await handler({
+        params: {
+          name: "set_actor_ownership",
+          arguments: { name: "Uchebe", user: "Edeker", level: "owner" },
+        },
+      });
+      expect(client.modifyDocument).toHaveBeenCalledWith("Actor", "a1", [{ "ownership.u1": 3 }]);
+      expect((response as any).isError).toBeUndefined();
+    });
+
+    test("set_actor_ownership level none removes the key", async () => {
+      const client = {
+        isConnected: () => true,
+        getDocuments: jest.fn().mockResolvedValue([{ _id: "u1", name: "Edeker" }]),
+        getDocument: jest.fn().mockResolvedValue({ _id: "a1", name: "Uchebe", ownership: { default: 0, u1: 3 } }),
+        modifyDocument: jest.fn().mockResolvedValue({ ok: true }),
+      } as any;
+      const handler = createToolHandler(client);
+      await handler({
+        params: {
+          name: "set_actor_ownership",
+          arguments: { _id: "a1", user: "u1", level: "none" },
+        },
+      });
+      expect(client.modifyDocument).toHaveBeenCalledWith("Actor", "a1", [{ "ownership.-=u1": null }]);
+    });
+
+    test("get_current_scene returns the active scene", async () => {
+      const client = {
+        isConnected: () => true,
+        getDocuments: jest.fn().mockResolvedValue([{ _id: "sc1", name: "Toydaria", active: true }]),
+      } as any;
+      const handler = createToolHandler(client);
+      const response = await handler({ params: { name: "get_current_scene", arguments: {} } });
+      expect(client.getDocuments).toHaveBeenCalledWith("scenes", expect.objectContaining({
+        where: { active: true },
+      }));
+      const body = JSON.parse((response as any).content[0].text);
+      expect(body.name).toBe("Toydaria");
+    });
+
+    test("get_current_scene handles no active scene", async () => {
+      const client = {
+        isConnected: () => true,
+        getDocuments: jest.fn().mockResolvedValue([]),
+      } as any;
+      const handler = createToolHandler(client);
+      const response = await handler({ params: { name: "get_current_scene", arguments: {} } });
+      const body = JSON.parse((response as any).content[0].text);
+      expect(body.active).toBeNull();
+    });
+  });
 });
