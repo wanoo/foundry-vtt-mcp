@@ -1,0 +1,9 @@
+{
+  "name": "foundry-mcp-clever-gateway",
+  "private": true,
+  "type": "module",
+  "description": "Exposition HTTP (streamable) du serveur MCP stdio, pour hébergement Clever Cloud.",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.17.2"
+  }
+}
