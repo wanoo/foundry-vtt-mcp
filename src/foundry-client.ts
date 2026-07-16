@@ -21,12 +21,17 @@ import {
 import { buildDocumentOperation } from "./core/operations.js";
 import {
   buildModifyDocumentMessage,
+  ENGINE_PONG,
   isEngineHandshake,
+  isEnginePing,
   isSessionEvent,
   parseAckMessage,
+  parseSessionPayload,
   parseWorldResponseMessage,
   WORLD_REQUEST_MESSAGE,
 } from "./core/socket-protocol.js";
+import { selectSocketConnection } from "./core/socket-connection.js";
+import { parseFoundryGeneration } from "./core/version.js";
 import {
   buildJoinPayload,
   extractSessionIdFromCookies,
@@ -39,6 +44,8 @@ interface FoundryConnection {
   credential: FoundryCredential;
   sessionId: string;
   ws: WebSocket;
+  /** Detected Foundry major generation (e.g. 13, 14), or null if unknown. */
+  generation: number | null;
 }
 
 interface SlimModule {
@@ -122,6 +129,49 @@ export class FoundryClient {
     const i = hostname.indexOf("/");
     if (i < 0) return { host: hostname, base: "" };
     return { host: hostname.slice(0, i), base: hostname.slice(i).replace(/\/$/, "") };
+  }
+
+  /**
+   * Detect the Foundry major generation via the public `GET /api/status`
+   * endpoint. This tells us how to bind the socket session on the WebSocket
+   * upgrade (query parameter for v13, cookie for v14). Returns null when the
+   * version cannot be determined, in which case a compatibility strategy that
+   * satisfies both mechanisms is used.
+   */
+  private async detectGeneration(hostname: string): Promise<number | null> {
+    const { host, base } = this.splitHost(hostname);
+    return new Promise((resolve) => {
+      const req = this.https.request(
+        {
+          hostname: host,
+          port: 443,
+          path: base + "/api/status",
+          method: "GET",
+        },
+        (res) => {
+          let data = "";
+          res.on("data", (chunk) => {
+            data += chunk;
+          });
+          res.on("end", () => {
+            const generation = parseFoundryGeneration(data);
+            this.logger.error(
+              `[FoundryClient] Detected Foundry generation for ${hostname}: ${generation ?? "unknown"}`
+            );
+            resolve(generation);
+          });
+        }
+      );
+
+      req.on("error", (error) => {
+        this.logger.error(
+          `[FoundryClient] Could not detect Foundry version for ${hostname}: ${error.message}`
+        );
+        resolve(null);
+      });
+
+      req.end();
+    });
   }
 
   /**
@@ -210,15 +260,31 @@ export class FoundryClient {
   }
 
   /**
-   * Establish WebSocket connection
+   * Establish WebSocket connection.
+   *
+   * The connection parameters depend on the Foundry generation: v13 binds the
+   * session via the `?session=` query parameter while v14 binds it via the
+   * `session` cookie on the upgrade request (see socket-connection.ts). This
+   * resolves once the transport is open; callers should then wait for the game
+   * session to bind via waitForGameSession().
    */
-  private connectWebSocket(hostname: string, sessionId: string): Promise<WebSocket> {
+  private connectWebSocket(
+    hostname: string,
+    sessionId: string,
+    generation: number | null = null
+  ): Promise<WebSocket> {
     return new Promise((resolve, reject) => {
-      const { host: wsHost, base: wsBase } = this.splitHost(hostname);
-      const wsUrl = `wss://${wsHost}${wsBase}/socket.io/?session=${sessionId}&EIO=4&transport=websocket`;
-      this.logger.error(`[FoundryClient] Connecting to WebSocket: ${wsUrl}`);
+      // Le hostname configuré peut inclure un préfixe de route
+      // ("rpg.example.com/star-wars") : selectSocketConnection construit l'URL
+      // à partir du hostname complet, le préfixe passe donc tel quel.
+      const { url, headers } = selectSocketConnection(generation, hostname, sessionId);
+      this.logger.error(
+        `[FoundryClient] Connecting to WebSocket (Foundry gen ${generation ?? "unknown"}): ${url}`
+      );
 
-      const ws = new this.WebSocketCtor(wsUrl);
+      const ws = headers
+        ? new this.WebSocketCtor(url, { headers })
+        : new this.WebSocketCtor(url);
 
       ws.on("open", () => {
       this.logger.error("[FoundryClient] WebSocket connection established");
@@ -262,14 +328,6 @@ export class FoundryClient {
       const message = data.toString();
       this.wsLogger.logInbound(message);
 
-      // Engine.IO heartbeat: the server pings ("2") every pingInterval and
-      // closes the socket after pingTimeout without a pong ("3"). Without this
-      // the connection silently dies every ~10 minutes.
-      if (message === "2") {
-        this.sendWebSocketMessage(ws, "3");
-        return;
-      }
-
       // Truncate: world dumps weigh tens of MB and would flood logs (and memory).
       this.logger.error(
         `[FoundryClient] WebSocket message: ${message.length > 300 ? `${message.slice(0, 300)}… (${message.length} chars)` : message}`
@@ -281,10 +339,64 @@ export class FoundryClient {
         return;
       }
 
+      if (isEnginePing(message)) {
+        // Engine.IO v4: the server pings; we must pong or the server drops the
+        // connection after pingTimeout (~10 min of silence for Foundry).
+        this.sendWebSocketMessage(ws, ENGINE_PONG);
+        return;
+      }
+
       if (isSessionEvent(message)) {
         this.logger.error("[FoundryClient] Received session event, connection ready");
         return;
       }
+    });
+  }
+
+  /**
+   * Wait for Foundry to bind the game session to this socket.
+   *
+   * Foundry emits `42["session", { sessionId, userId }]` once the socket is
+   * bound to the authenticated user, or `42["session", null]` if it is not.
+   * Data requests (world, modifyDocument, ...) only succeed after a non-null
+   * session, so we block until it arrives. A null session means binding failed
+   * (e.g. the session was not carried on the upgrade for this Foundry version);
+   * surfacing it here turns a silent 30s data timeout into an immediate, clear
+   * error.
+   */
+  private waitForGameSession(ws: WebSocket): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const timeout = this.setTimeoutFn(() => {
+        ws.off("message", messageHandler);
+        reject(new Error("Timed out waiting for Foundry to bind the game session (10s)"));
+      }, 10000);
+
+      const messageHandler = (data: WebSocket.Data) => {
+        const parsed = parseSessionPayload(data.toString());
+        if (!parsed.matched) {
+          return;
+        }
+
+        this.clearTimeoutFn(timeout);
+        ws.off("message", messageHandler);
+
+        if (!parsed.sessionId) {
+          reject(
+            new Error(
+              "Foundry returned a null session; the socket was not bound to a user. " +
+                "Check credentials and that the session was carried on the WebSocket upgrade."
+            )
+          );
+          return;
+        }
+
+        this.logger.error(
+          `[FoundryClient] Game session bound (sessionId=${parsed.sessionId}, userId=${parsed.userId ?? "unknown"})`
+        );
+        resolve();
+      };
+
+      ws.on("message", messageHandler);
     });
   }
 
@@ -306,13 +418,17 @@ export class FoundryClient {
     for (;;) {
       try {
         // Always start from a fresh session: covers both expired sessions and
-        // full server restarts.
+        // full server restarts. Re-detect the generation too — the server may
+        // have been upgraded (v13 -> v14) while it was unreachable.
+        const generation = await this.detectGeneration(hostname);
         const sessionId = await this.getSession(hostname);
         const success = await this.authenticate(hostname, sessionId, credential);
         if (success) {
-          const ws = await this.connectWebSocket(hostname, sessionId);
+          const ws = await this.connectWebSocket(hostname, sessionId, generation);
           this.setupWebSocketHandlers(ws);
+          await this.waitForGameSession(ws);
           this.connection.sessionId = sessionId;
+          this.connection.generation = generation;
           this.connection.ws = ws;
           this.logger.error("[FoundryClient] Reconnection successful");
           break;
@@ -360,9 +476,13 @@ export class FoundryClient {
           continue;
         }
 
-        // Step 3: Establish WebSocket connection
-        const ws = await this.connectWebSocket(hostname, sessionId);
+        // Step 3: Detect the Foundry generation to pick the session-binding strategy
+        const generation = await this.detectGeneration(hostname);
+
+        // Step 4: Establish WebSocket connection and wait for the game session to bind
+        const ws = await this.connectWebSocket(hostname, sessionId, generation);
         this.setupWebSocketHandlers(ws);
+        await this.waitForGameSession(ws);
 
         // Store the successful connection
         this.connection = {
@@ -370,6 +490,7 @@ export class FoundryClient {
           credential,
           sessionId,
           ws,
+          generation,
         };
         this.activeCredentialIndex = i;
 
@@ -421,14 +542,17 @@ export class FoundryClient {
       throw new Error(`Authentication failed for ${hostname}`);
     }
 
-    const ws = await this.connectWebSocket(hostname, sessionId);
+    const generation = await this.detectGeneration(hostname);
+    const ws = await this.connectWebSocket(hostname, sessionId, generation);
     this.setupWebSocketHandlers(ws);
+    await this.waitForGameSession(ws);
 
     this.connection = {
       hostname,
       credential,
       sessionId,
       ws,
+      generation,
     };
     this.activeCredentialIndex = targetIndex;
 

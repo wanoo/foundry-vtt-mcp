@@ -207,6 +207,135 @@ describe("FoundryClient", () => {
     jest.useRealTimers();
   });
 
+  test("connectWebSocket binds the session via cookie header for Foundry v14", async () => {
+    jest.useFakeTimers();
+    let created: TestWebSocket | null = null;
+    let ctorUrl = "";
+    let ctorOpts: unknown = "unset";
+    class Ws extends TestWebSocket {
+      constructor(url: string, opts?: unknown) {
+        super(url);
+        created = this;
+        ctorUrl = url;
+        ctorOpts = opts;
+      }
+    }
+
+    const { client } = createClient({ WebSocketCtor: Ws as any });
+    const promise = (client as any).connectWebSocket("host", "sid", 14);
+    created?.emit("open");
+
+    await expect(promise).resolves.toBe(created);
+    expect(ctorUrl).toBe("wss://host/socket.io/?EIO=4&transport=websocket");
+    expect(ctorUrl).not.toContain("session=sid");
+    expect(ctorOpts).toEqual({ headers: { Cookie: "session=sid" } });
+    jest.useRealTimers();
+  });
+
+  test("connectWebSocket binds the session via query param for Foundry v13", async () => {
+    jest.useFakeTimers();
+    let created: TestWebSocket | null = null;
+    let ctorUrl = "";
+    let ctorOpts: unknown = "unset";
+    class Ws extends TestWebSocket {
+      constructor(url: string, opts?: unknown) {
+        super(url);
+        created = this;
+        ctorUrl = url;
+        ctorOpts = opts;
+      }
+    }
+
+    const { client } = createClient({ WebSocketCtor: Ws as any });
+    const promise = (client as any).connectWebSocket("host", "sid", 13);
+    created?.emit("open");
+
+    await expect(promise).resolves.toBe(created);
+    expect(ctorUrl).toBe("wss://host/socket.io/?session=sid&EIO=4&transport=websocket");
+    expect(ctorOpts).toBeUndefined();
+    jest.useRealTimers();
+  });
+
+  test("detectGeneration parses the version from /api/status", async () => {
+    const https = createHttpsStub((_req, callback) => {
+      const res = new EventEmitter() as any;
+      res.statusCode = 200;
+      callback(res);
+      res.emit("data", JSON.stringify({ active: true, version: "14.364" }));
+      res.emit("end");
+    });
+    const { client } = createClient({ https });
+
+    await expect((client as any).detectGeneration("host")).resolves.toBe(14);
+    expect(https.request).toHaveBeenCalledWith(
+      expect.objectContaining({ hostname: "host", path: "/api/status", method: "GET" }),
+      expect.any(Function)
+    );
+  });
+
+  test("detectGeneration returns null when the version cannot be determined", async () => {
+    const https = createHttpsStub((_req, callback) => {
+      const res = new EventEmitter() as any;
+      res.statusCode = 200;
+      callback(res);
+      res.emit("data", "not json");
+      res.emit("end");
+    });
+    const { client } = createClient({ https });
+
+    await expect((client as any).detectGeneration("host")).resolves.toBeNull();
+  });
+
+  test("detectGeneration returns null on request error", async () => {
+    const https = {
+      request: jest.fn((_options: any, _callback: any) => {
+        const req = new EventEmitter() as EventEmitter & { end: jest.Mock };
+        req.end = jest.fn(() => req.emit("error", new Error("fail")));
+        return req;
+      }),
+    };
+    const { client } = createClient({ https });
+
+    await expect((client as any).detectGeneration("host")).resolves.toBeNull();
+  });
+
+  test("waitForGameSession resolves when the session is bound", async () => {
+    jest.useFakeTimers();
+    const { client } = createClient({ WebSocketCtor: TestWebSocket });
+    const ws = new TestWebSocket("ws://host");
+
+    const promise = (client as any).waitForGameSession(ws);
+    ws.emit("message", '42["session",{"sessionId":"abc","userId":"u1"}]');
+
+    await expect(promise).resolves.toBeUndefined();
+    jest.useRealTimers();
+  });
+
+  test("waitForGameSession rejects on a null session", async () => {
+    jest.useFakeTimers();
+    const { client } = createClient({ WebSocketCtor: TestWebSocket });
+    const ws = new TestWebSocket("ws://host");
+
+    const promise = (client as any).waitForGameSession(ws);
+    ws.emit("message", '42["session",null]');
+
+    await expect(promise).rejects.toThrow("null session");
+    jest.useRealTimers();
+  });
+
+  test("waitForGameSession ignores unrelated messages then times out", async () => {
+    jest.useFakeTimers();
+    const { client } = createClient({ WebSocketCtor: TestWebSocket });
+    const ws = new TestWebSocket("ws://host");
+
+    const promise = (client as any).waitForGameSession(ws);
+    ws.emit("message", '42["userActivity","u1",{}]');
+    jest.advanceTimersByTime(10000);
+
+    await expect(promise).rejects.toThrow("Timed out waiting for Foundry to bind the game session");
+    jest.useRealTimers();
+  });
+
   test("setupWebSocketHandlers responds to handshake", () => {
     const { client } = createClient({ WebSocketCtor: TestWebSocket });
     const ws = new TestWebSocket("ws://host");
@@ -225,6 +354,16 @@ describe("FoundryClient", () => {
     ws.emit("message", "42[\"session\",{}]");
 
     expect(ws.send).not.toHaveBeenCalled();
+  });
+
+  test("setupWebSocketHandlers replies to Engine.IO ping with a pong", () => {
+    const { client } = createClient({ WebSocketCtor: TestWebSocket });
+    const ws = new TestWebSocket("ws://host");
+    (client as any).setupWebSocketHandlers(ws);
+
+    ws.emit("message", "2");
+
+    expect(ws.send).toHaveBeenCalledWith("3");
   });
 
   test("setupWebSocketHandlers triggers reconnect on close", () => {
@@ -269,6 +408,7 @@ describe("FoundryClient", () => {
     const connectWebSocket = jest
       .spyOn(client as any, "connectWebSocket")
       .mockResolvedValue(new TestWebSocket("ws://host"));
+    jest.spyOn(client as any, "waitForGameSession").mockResolvedValue(undefined);
 
     await (client as any).reconnect();
 
@@ -293,9 +433,11 @@ describe("FoundryClient", () => {
     jest.spyOn(client as any, "authenticate")
       .mockResolvedValueOnce(false)
       .mockResolvedValueOnce(true);
+    jest.spyOn(client as any, "detectGeneration").mockResolvedValue(14);
     jest.spyOn(client as any, "connectWebSocket")
       .mockResolvedValue(new TestWebSocket("ws://b"));
     jest.spyOn(client as any, "setupWebSocketHandlers").mockImplementation(() => undefined);
+    jest.spyOn(client as any, "waitForGameSession").mockResolvedValue(undefined);
 
     await client.connect();
     expect(client.getHostname()).toBe("b");
@@ -328,8 +470,10 @@ describe("FoundryClient", () => {
 
     jest.spyOn(client as any, "getSession").mockResolvedValue("sid");
     jest.spyOn(client as any, "authenticate").mockResolvedValue(true);
+    jest.spyOn(client as any, "detectGeneration").mockResolvedValue(13);
     jest.spyOn(client as any, "connectWebSocket").mockResolvedValue(new TestWebSocket("ws://b"));
     jest.spyOn(client as any, "setupWebSocketHandlers").mockImplementation(() => undefined);
+    jest.spyOn(client as any, "waitForGameSession").mockResolvedValue(undefined);
 
     await client.chooseFoundryInstance({ item_order: 1 });
 
