@@ -29,19 +29,46 @@ if (!MCP_SECRET) {
 }
 const MCP_PATH = `/mcp-${MCP_SECRET}`;
 
-// --- 1. Serveur MCP stdio en child process -------------------------------------
+// --- 1. Serveur MCP stdio en child process SUPERVISÉ ---------------------------
+// Si le child meurt (OOM sur un gros dump de monde, crash), on le respawn avec
+// un délai — sinon la passerelle devient un zombie qui répond « Not connected ».
 const credsPath = join(ROOT, 'config', 'foundry_credentials.json');
 mkdirSync(dirname(credsPath), { recursive: true });
 writeFileSync(credsPath, process.env.FOUNDRY_CREDENTIALS_JSON ||
   '[{"_id":"placeholder","hostname":"localhost","userid":"x","password":"x"}]');
-const client = new Client({ name: 'clever-gateway', version: '1.0.0' });
-await client.connect(new StdioClientTransport({
-  command: process.execPath,
-  args: [join(ROOT, 'build', 'server.js')],
-  env: { ...process.env, FOUNDRY_CREDENTIALS: credsPath },
-  stderr: 'inherit',
-}));
-console.log('[gateway] serveur MCP stdio démarré');
+
+let client = null;
+async function connectBackend() {
+  const c = new Client({ name: 'clever-gateway', version: '1.0.0' });
+  await c.connect(new StdioClientTransport({
+    command: process.execPath,
+    args: [join(ROOT, 'build', 'server.js')],
+    // L'instance (nano, 512 Mo) porte DEUX process Node : le CC_NODE par défaut
+    // hérité (--max-old-space-size≈268) cape aussi le child ; on lui laisse la
+    // plus grosse part, c'est lui qui parse les dumps de monde.
+    env: { ...process.env, FOUNDRY_CREDENTIALS: credsPath, NODE_OPTIONS: '--max-old-space-size=384' },
+    stderr: 'inherit',
+  }));
+  c.onclose = () => {
+    if (client !== c) return; // fermeture d'un ancien client déjà remplacé
+    client = null;
+    console.error('[gateway] backend stdio fermé — respawn dans 3 s');
+    setTimeout(() => {
+      connectBackend().catch((e) => {
+        console.error(`[gateway] respawn raté (${e.message}) — nouvel essai dans 10 s`);
+        setTimeout(() => connectBackend().catch((err) => console.error('[gateway] respawn:', err.message)), 10_000);
+      });
+    }, 3_000);
+  };
+  client = c;
+  console.log('[gateway] serveur MCP stdio démarré');
+}
+await connectBackend();
+
+function requireBackend() {
+  if (!client) throw new Error('Backend MCP indisponible (respawn en cours) — réessayer dans quelques secondes');
+  return client;
+}
 
 // --- 2. Fabrique de sessions MCP HTTP (une par client Claude) ------------------
 function makeSession() {
@@ -50,9 +77,10 @@ function makeSession() {
     { capabilities: { tools: {} } }
   );
   // Passe-plat : la liste et l'appel d'outils sont relayés au serveur stdio.
-  server.setRequestHandler(ListToolsRequestSchema, async () => client.listTools());
+  // requireBackend() relit `client` à chaque appel : les sessions survivent au respawn.
+  server.setRequestHandler(ListToolsRequestSchema, async () => requireBackend().listTools());
   server.setRequestHandler(CallToolRequestSchema, async (req) =>
-    client.callTool({ name: req.params.name, arguments: req.params.arguments || {} })
+    requireBackend().callTool({ name: req.params.name, arguments: req.params.arguments || {} })
   );
   return server;
 }

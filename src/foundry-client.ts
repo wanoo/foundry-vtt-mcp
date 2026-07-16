@@ -270,7 +270,10 @@ export class FoundryClient {
         return;
       }
 
-      this.logger.error(`[FoundryClient] WebSocket message: ${message}`);
+      // Truncate: world dumps weigh tens of MB and would flood logs (and memory).
+      this.logger.error(
+        `[FoundryClient] WebSocket message: ${message.length > 300 ? `${message.slice(0, 300)}… (${message.length} chars)` : message}`
+      );
 
       if (isEngineHandshake(message)) {
         this.logger.error("[FoundryClient] Received Engine.IO handshake, sending Socket.IO connect");
