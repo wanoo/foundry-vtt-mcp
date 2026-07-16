@@ -228,6 +228,7 @@ describe("server tools", () => {
     expect(client.createDocument).toHaveBeenCalledWith("Actor", [{ name: "x" }], {
       parentUuid: "Scene.1",
       pack: undefined,
+      keepId: false,
     });
     expect((response as any).isError).toBeUndefined();
   });
@@ -253,6 +254,7 @@ describe("server tools", () => {
     expect(client.createDocument).toHaveBeenCalledWith("Actor", [{ name: "Goblin" }], {
       parentUuid: undefined,
       pack: "world.monsters",
+      keepId: false,
     });
     expect((response as any).isError).toBeUndefined();
   });
@@ -740,6 +742,196 @@ describe("server tools", () => {
 
       expect((response as any).isError).toBe(true);
       expect(response.content[0].text).toContain("Compendium not found");
+    });
+  });
+
+  describe("broadcast & file tools", () => {
+    test("createToolDefinitions includes the new tools", () => {
+      const tools = createToolDefinitions();
+      for (const name of [
+        "create_directory",
+        "show_journal_to_players",
+        "share_image",
+        "toggle_pause",
+        "activate_scene",
+        "pull_users_to_scene",
+        "set_setting",
+      ]) {
+        expect(tools.find((tool) => tool.name === name)).toBeDefined();
+      }
+    });
+
+    test("create_directory executes", async () => {
+      const client = {
+        isConnected: () => true,
+        createDirectory: jest.fn().mockResolvedValue({ path: "worlds/x/img" }),
+      } as any;
+
+      const handler = createToolHandler(client);
+      const response = await handler({
+        params: { name: "create_directory", arguments: { target: "worlds/x/img" } },
+      });
+
+      expect(client.createDirectory).toHaveBeenCalledWith("worlds/x/img", "data");
+      expect((response as any).isError).toBeUndefined();
+    });
+
+    test("create_directory requires target", async () => {
+      const client = { isConnected: () => true } as any;
+      const handler = createToolHandler(client);
+      const response = await handler({ params: { name: "create_directory", arguments: {} } });
+      expect((response as any).isError).toBe(true);
+    });
+
+    test("show_journal_to_players resolves name to uuid", async () => {
+      const client = {
+        isConnected: () => true,
+        getDocument: jest.fn().mockResolvedValue({ _id: "abc123", name: "Handout" }),
+        showJournalEntry: jest.fn().mockResolvedValue(undefined),
+      } as any;
+
+      const handler = createToolHandler(client);
+      const response = await handler({
+        params: { name: "show_journal_to_players", arguments: { name: "Handout", force: true } },
+      });
+
+      expect(client.getDocument).toHaveBeenCalledWith(
+        "journal",
+        { _id: undefined, name: "Handout" },
+        { requestedFields: ["_id", "name"] }
+      );
+      expect(client.showJournalEntry).toHaveBeenCalledWith("JournalEntry.abc123", true, []);
+      expect((response as any).isError).toBeUndefined();
+    });
+
+    test("show_journal_to_players accepts a raw uuid", async () => {
+      const client = {
+        isConnected: () => true,
+        showJournalEntry: jest.fn().mockResolvedValue(undefined),
+      } as any;
+
+      const handler = createToolHandler(client);
+      await handler({
+        params: {
+          name: "show_journal_to_players",
+          arguments: { uuid: "JournalEntry.abc123.JournalEntryPage.def456" },
+        },
+      });
+
+      expect(client.showJournalEntry).toHaveBeenCalledWith(
+        "JournalEntry.abc123.JournalEntryPage.def456",
+        false,
+        []
+      );
+    });
+
+    test("share_image executes", async () => {
+      const client = {
+        isConnected: () => true,
+        shareImage: jest.fn(),
+      } as any;
+
+      const handler = createToolHandler(client);
+      const response = await handler({
+        params: { name: "share_image", arguments: { image: "worlds/x/a.png", title: "Vision" } },
+      });
+
+      expect(client.shareImage).toHaveBeenCalledWith({
+        image: "worlds/x/a.png",
+        title: "Vision",
+        caption: undefined,
+        users: [],
+        showTitle: true,
+      });
+      expect((response as any).isError).toBeUndefined();
+    });
+
+    test("toggle_pause executes", async () => {
+      const client = {
+        isConnected: () => true,
+        setPause: jest.fn(),
+      } as any;
+
+      const handler = createToolHandler(client);
+      const response = await handler({
+        params: { name: "toggle_pause", arguments: { paused: true } },
+      });
+
+      expect(client.setPause).toHaveBeenCalledWith(true);
+      expect((response as any).isError).toBeUndefined();
+    });
+
+    test("activate_scene updates the scene and can pull users", async () => {
+      const client = {
+        isConnected: () => true,
+        getDocument: jest.fn().mockResolvedValue({ _id: "sc1", name: "Riar" }),
+        getDocuments: jest.fn().mockResolvedValue([{ _id: "u1" }, { _id: "bot" }]),
+        getUserId: () => "bot",
+        modifyDocument: jest.fn().mockResolvedValue({ ok: true }),
+        pullUsersToScene: jest.fn(),
+      } as any;
+
+      const handler = createToolHandler(client);
+      const response = await handler({
+        params: { name: "activate_scene", arguments: { name: "Riar", pull_users: true } },
+      });
+
+      expect(client.modifyDocument).toHaveBeenCalledWith("Scene", "sc1", [{ active: true }]);
+      expect(client.pullUsersToScene).toHaveBeenCalledWith("sc1", ["u1"]);
+      expect((response as any).isError).toBeUndefined();
+    });
+
+    test("pull_users_to_scene does not activate", async () => {
+      const client = {
+        isConnected: () => true,
+        getDocument: jest.fn().mockResolvedValue({ _id: "sc1", name: "Riar" }),
+        getUserId: () => "bot",
+        modifyDocument: jest.fn(),
+        pullUsersToScene: jest.fn(),
+      } as any;
+
+      const handler = createToolHandler(client);
+      await handler({
+        params: { name: "pull_users_to_scene", arguments: { _id: "sc1", users: ["u1", "u2"] } },
+      });
+
+      expect(client.modifyDocument).not.toHaveBeenCalled();
+      expect(client.pullUsersToScene).toHaveBeenCalledWith("sc1", ["u1", "u2"]);
+    });
+
+    test("set_setting updates an existing setting", async () => {
+      const client = {
+        isConnected: () => true,
+        getSettings: jest.fn().mockResolvedValue([{ _id: "st1", key: "core.x", value: "1" }]),
+        modifyDocument: jest.fn().mockResolvedValue({ ok: true }),
+      } as any;
+
+      const handler = createToolHandler(client);
+      const response = await handler({
+        params: { name: "set_setting", arguments: { key: "core.x", value: { a: 1 } } },
+      });
+
+      expect(client.modifyDocument).toHaveBeenCalledWith("Setting", "st1", [
+        { value: JSON.stringify({ a: 1 }) },
+      ]);
+      expect((response as any).isError).toBeUndefined();
+    });
+
+    test("set_setting creates a missing setting", async () => {
+      const client = {
+        isConnected: () => true,
+        getSettings: jest.fn().mockResolvedValue([]),
+        createDocument: jest.fn().mockResolvedValue({ ok: true }),
+      } as any;
+
+      const handler = createToolHandler(client);
+      await handler({
+        params: { name: "set_setting", arguments: { key: "core.y", value: true } },
+      });
+
+      expect(client.createDocument).toHaveBeenCalledWith("Setting", [
+        { key: "core.y", value: "true" },
+      ]);
     });
   });
 });

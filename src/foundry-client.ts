@@ -322,7 +322,7 @@ export class FoundryClient {
           `[FoundryClient] Reconnection attempt failed: ${error} - retrying in ${delayMs}ms`
         );
       }
-      await new Promise((resolve) => setTimeout(resolve, delayMs));
+      await new Promise((resolve) => this.setTimeoutFn(resolve, delayMs));
       delayMs = Math.min(delayMs * 2, 60_000);
     }
     this.reconnecting = false;
@@ -1332,6 +1332,110 @@ export class FoundryClient {
    */
   getSessionId(): string | null {
     return this.connection?.sessionId || null;
+  }
+
+  /**
+   * Get the Foundry user _id the client is logged in as
+   */
+  getUserId(): string | null {
+    return this.connection?.credential.userid || null;
+  }
+
+  /**
+   * Generic socket.io emit expecting an acknowledgement (43<ackId> frame).
+   * Returns the ack payload array (may be empty for void acks).
+   */
+  async emitWithAck(event: string, args: unknown[], timeoutMs = 30000): Promise<unknown[]> {
+    if (!this.connection || this.connection.ws.readyState !== this.WebSocketCtor.OPEN) {
+      throw new Error("Not connected to Foundry server");
+    }
+    const ws = this.connection.ws;
+    const ackId = this.messageCounter++;
+    const ackPrefix = `43${ackId}[`;
+
+    return new Promise((resolve, reject) => {
+      const timeout = this.setTimeoutFn(() => {
+        ws.off("message", messageHandler);
+        reject(new Error(`Timeout waiting for ${event} ack (${timeoutMs / 1000}s)`));
+      }, timeoutMs);
+
+      const messageHandler = (data: WebSocket.Data) => {
+        const message = data.toString();
+        if (!message.startsWith(ackPrefix)) {
+          return;
+        }
+        this.clearTimeoutFn(timeout);
+        ws.off("message", messageHandler);
+        try {
+          resolve(JSON.parse(message.slice(`43${ackId}`.length)) as unknown[]);
+        } catch (error) {
+          reject(new Error(`Failed to parse ${event} ack: ${error}`));
+        }
+      };
+
+      ws.on("message", messageHandler);
+      this.sendWebSocketMessage(ws, `42${ackId}${JSON.stringify([event, ...args])}`);
+    });
+  }
+
+  /**
+   * Fire-and-forget socket.io emit (no acknowledgement expected).
+   */
+  emitEvent(event: string, args: unknown[]): void {
+    if (!this.connection || this.connection.ws.readyState !== this.WebSocketCtor.OPEN) {
+      throw new Error("Not connected to Foundry server");
+    }
+    this.sendWebSocketMessage(this.connection.ws, `42${JSON.stringify([event, ...args])}`);
+  }
+
+  /**
+   * Create a directory in Foundry's file storage
+   * (socket "manageFiles" with action "createDirectory", like FilePicker.createDirectory).
+   */
+  async createDirectory(target: string, source = "data"): Promise<Record<string, unknown>> {
+    const [result] = await this.emitWithAck("manageFiles", [
+      { action: "createDirectory", storage: source, target },
+      {},
+    ]);
+    const res = (result ?? {}) as Record<string, unknown>;
+    if (res.error) {
+      throw new Error(`createDirectory failed: ${res.error}`);
+    }
+    return res;
+  }
+
+  /**
+   * Show a JournalEntry to connected players (socket "showEntry", like JournalEntry#show).
+   * @param uuid - Document uuid (e.g. "JournalEntry.abc123" or a page uuid)
+   * @param force - Show even to players lacking observe permission
+   * @param users - Restrict to specific user _ids (empty = all connected)
+   */
+  async showJournalEntry(uuid: string, force = false, users: string[] = []): Promise<void> {
+    await this.emitWithAck("showEntry", [uuid, { force, users }]);
+  }
+
+  /**
+   * Display an image to connected players (socket "shareImage", like ImagePopout.showImage).
+   */
+  shareImage(config: { image: string; title?: string; caption?: string; users?: string[]; showTitle?: boolean }): void {
+    const { image, users = [], ...options } = config;
+    this.emitEvent("shareImage", [{ image, users, ...options }]);
+  }
+
+  /**
+   * Pause or unpause the game (socket "pause", like Game#togglePause). GM only.
+   */
+  setPause(paused: boolean): void {
+    this.emitEvent("pause", [paused, { broadcast: true, userId: this.getUserId() }]);
+  }
+
+  /**
+   * Pull users to a scene (socket "pullToScene", one emit per user).
+   */
+  pullUsersToScene(sceneId: string, userIds: string[]): void {
+    for (const userId of userIds) {
+      this.emitEvent("pullToScene", [sceneId, userId]);
+    }
   }
 
   /**

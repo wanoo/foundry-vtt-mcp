@@ -245,7 +245,12 @@ describe("FoundryClient", () => {
   });
 
   test("reconnect handles success and fallbacks", async () => {
-    const { client } = createClient({ WebSocketCtor: TestWebSocket });
+    // Backoff sleeps resolve immediately: the injected timer fires without delay.
+    const immediateTimeout = ((cb: () => void) => {
+      cb();
+      return 0 as any;
+    }) as typeof setTimeout;
+    const { client } = createClient({ WebSocketCtor: TestWebSocket, setTimeoutFn: immediateTimeout });
     const ws = new TestWebSocket("ws://host");
     (client as any).connection = {
       hostname: "host",

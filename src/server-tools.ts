@@ -364,6 +364,136 @@ export const deleteCompendiumTool = {
   },
 };
 
+const createDirectoryTool = {
+  name: "create_directory",
+  description:
+    "Create a directory in FoundryVTT's file storage. Useful before upload_file, which cannot create missing folders. The parent directory must already exist (create nested paths one level at a time).",
+  inputSchema: {
+    type: "object",
+    properties: {
+      target: {
+        type: "string",
+        description: `Directory path to create, relative to the storage root (e.g. "worlds/my-world/images/handouts")`,
+      },
+      source: {
+        type: "string",
+        description: `Storage source: "data" (default), "public" or "s3"`,
+      },
+    },
+    required: ["target"],
+  },
+};
+
+const showJournalToPlayersTool = {
+  name: "show_journal_to_players",
+  description:
+    "Show a JournalEntry to connected players, like the GM's 'Show to Players' action. Opens the journal on their screen. By default only players with observe permission see it; use force to override.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      _id: { type: "string", description: "The _id of the JournalEntry to show" },
+      name: { type: "string", description: "The name of the JournalEntry to show (alternative to _id)" },
+      uuid: {
+        type: "string",
+        description: `Full document uuid (alternative to _id/name), e.g. "JournalEntry.abc123" or a page uuid "JournalEntry.abc123.JournalEntryPage.def456"`,
+      },
+      force: {
+        type: "boolean",
+        description: "Show the entry even to players who lack permission to observe it (default false)",
+      },
+      users: {
+        type: "array",
+        items: { type: "string" },
+        description: "Restrict to these user _ids (default: all connected players)",
+      },
+    },
+  },
+};
+
+const shareImageTool = {
+  name: "share_image",
+  description:
+    "Display an image fullscreen to connected players (ImagePopout), like the GM's 'Show to Players' on an image. The image must be reachable by the players' clients (a path in Foundry's storage or a URL).",
+  inputSchema: {
+    type: "object",
+    properties: {
+      image: { type: "string", description: `Image path or URL (e.g. "worlds/my-world/images/handout.png")` },
+      title: { type: "string", description: "Window title shown above the image" },
+      caption: { type: "string", description: "Optional caption displayed with the image" },
+      users: {
+        type: "array",
+        items: { type: "string" },
+        description: "Restrict to these user _ids (default: all connected players)",
+      },
+      show_title: { type: "boolean", description: "Whether the title is visible to players (default true)" },
+    },
+    required: ["image"],
+  },
+};
+
+const togglePauseTool = {
+  name: "toggle_pause",
+  description: "Pause or unpause the game for all connected players (requires the logged-in user to be a GM).",
+  inputSchema: {
+    type: "object",
+    properties: {
+      paused: { type: "boolean", description: "true to pause the game, false to resume it" },
+    },
+    required: ["paused"],
+  },
+};
+
+const activateSceneTool = {
+  name: "activate_scene",
+  description:
+    "Set a scene as the currently active scene (the one players see). Optionally pull connected users to it.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      _id: { type: "string", description: "The _id of the scene to activate" },
+      name: { type: "string", description: "The name of the scene to activate (alternative to _id)" },
+      pull_users: {
+        type: "boolean",
+        description: "Also pull all users to the scene after activating it (default false)",
+      },
+    },
+  },
+};
+
+const pullUsersToSceneTool = {
+  name: "pull_users_to_scene",
+  description:
+    "Pull connected users to a scene (their client switches to viewing it). Does not change the active scene.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      _id: { type: "string", description: "The _id of the target scene" },
+      name: { type: "string", description: "The name of the target scene (alternative to _id)" },
+      users: {
+        type: "array",
+        items: { type: "string" },
+        description: "User _ids to pull (default: every user of the world except the one this client is logged in as)",
+      },
+    },
+  },
+};
+
+const setSettingTool = {
+  name: "set_setting",
+  description:
+    "Set a world-scoped setting value (upsert: updates the Setting document if the key exists, creates it otherwise). Keys are namespaced like \"module.setting\" or \"system.setting\" — see get_settings.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      key: { type: "string", description: `The setting key (e.g. "starwarsffg.dPoolLight")` },
+      value: {
+        description: "The value to store (any JSON value; it is serialized the way Foundry stores settings)",
+      },
+    },
+    required: ["key", "value"],
+  },
+};
+
 export function createToolDefinitions() {
   return [
     ...DOCUMENT_TYPES.flatMap((config) => [
@@ -381,6 +511,13 @@ export function createToolDefinitions() {
     browseFilesTool,
     createCompendiumTool,
     deleteCompendiumTool,
+    createDirectoryTool,
+    showJournalToPlayersTool,
+    shareImageTool,
+    togglePauseTool,
+    activateSceneTool,
+    pullUsersToSceneTool,
+    setSettingTool,
   ];
 }
 
@@ -706,6 +843,174 @@ export function createToolHandler(foundryClient: FoundryClient) {
       } catch (error) {
         return errorResponse(
           `Error deleting compendium: ${error instanceof Error ? error.message : String(error)}`
+        );
+      }
+    }
+
+    if (name === "create_directory") {
+      try {
+        const target = args?.target as string | undefined;
+        const source = (args?.source as string | undefined) || "data";
+
+        if (!target) {
+          return errorResponse("Error: 'target' is required");
+        }
+
+        const result = await foundryClient.createDirectory(target, source);
+        return successResponse(result);
+      } catch (error) {
+        return errorResponse(
+          `Error creating directory: ${error instanceof Error ? error.message : String(error)}`
+        );
+      }
+    }
+
+    if (name === "show_journal_to_players") {
+      try {
+        let uuid = args?.uuid as string | undefined;
+        const force = (args?.force as boolean | undefined) ?? false;
+        const users = (args?.users as string[] | undefined) ?? [];
+
+        if (!uuid) {
+          const _id = args?._id as string | undefined;
+          const docName = args?.name as string | undefined;
+          if (!_id && !docName) {
+            return errorResponse("Error: Must provide one of: uuid, _id, or name");
+          }
+          const doc = await foundryClient.getDocument(
+            "journal",
+            { _id, name: docName },
+            { requestedFields: ["_id", "name"] }
+          );
+          if (!doc) {
+            return errorResponse("Error: JournalEntry not found");
+          }
+          uuid = `JournalEntry.${doc._id}`;
+        }
+
+        await foundryClient.showJournalEntry(uuid, force, users);
+        return successResponse({ shown: uuid, force, users: users.length ? users : "all" });
+      } catch (error) {
+        return errorResponse(
+          `Error showing journal: ${error instanceof Error ? error.message : String(error)}`
+        );
+      }
+    }
+
+    if (name === "share_image") {
+      try {
+        const image = args?.image as string | undefined;
+        if (!image) {
+          return errorResponse("Error: 'image' is required");
+        }
+
+        foundryClient.shareImage({
+          image,
+          title: args?.title as string | undefined,
+          caption: args?.caption as string | undefined,
+          users: (args?.users as string[] | undefined) ?? [],
+          showTitle: (args?.show_title as boolean | undefined) ?? true,
+        });
+        return successResponse({ shared: image });
+      } catch (error) {
+        return errorResponse(
+          `Error sharing image: ${error instanceof Error ? error.message : String(error)}`
+        );
+      }
+    }
+
+    if (name === "toggle_pause") {
+      try {
+        const paused = args?.paused as boolean | undefined;
+        if (paused === undefined) {
+          return errorResponse("Error: 'paused' is required");
+        }
+
+        foundryClient.setPause(paused);
+        return successResponse({ paused });
+      } catch (error) {
+        return errorResponse(
+          `Error toggling pause: ${error instanceof Error ? error.message : String(error)}`
+        );
+      }
+    }
+
+    if (name === "activate_scene" || name === "pull_users_to_scene") {
+      try {
+        const _id = args?._id as string | undefined;
+        const docName = args?.name as string | undefined;
+        if (!_id && !docName) {
+          return errorResponse("Error: Must provide one of: _id or name");
+        }
+
+        const scene = await foundryClient.getDocument(
+          "scenes",
+          { _id, name: docName },
+          { requestedFields: ["_id", "name"] }
+        );
+        if (!scene) {
+          return errorResponse("Error: Scene not found");
+        }
+        const sceneId = scene._id as string;
+
+        if (name === "activate_scene") {
+          await foundryClient.modifyDocument("Scene", sceneId, [{ active: true }]);
+        }
+
+        let pulled: string[] = [];
+        const wantPull = name === "pull_users_to_scene" || (args?.pull_users as boolean | undefined);
+        if (wantPull) {
+          pulled = (args?.users as string[] | undefined) ?? [];
+          if (!pulled.length) {
+            const users = (await foundryClient.getDocuments("users", {
+              requestedFields: ["_id"],
+            })) as Record<string, unknown>[];
+            const selfId = foundryClient.getUserId();
+            pulled = users.map((u) => u._id as string).filter((id) => id && id !== selfId);
+          }
+          foundryClient.pullUsersToScene(sceneId, pulled);
+        }
+
+        return successResponse({
+          scene: { _id: sceneId, name: scene.name },
+          activated: name === "activate_scene",
+          pulledUsers: pulled,
+        });
+      } catch (error) {
+        return errorResponse(
+          `Error on scene operation: ${error instanceof Error ? error.message : String(error)}`
+        );
+      }
+    }
+
+    if (name === "set_setting") {
+      try {
+        const key = args?.key as string | undefined;
+        const value = args?.value;
+        if (!key || value === undefined) {
+          return errorResponse("Error: 'key' and 'value' are required");
+        }
+
+        const serialized = JSON.stringify(value);
+        const existing = (await foundryClient.getSettings({
+          where: { key },
+        })) as Record<string, unknown>[];
+
+        let result: unknown;
+        let action: string;
+        if (existing.length > 0) {
+          const _id = existing[0]._id as string;
+          result = await foundryClient.modifyDocument("Setting", _id, [{ value: serialized }]);
+          action = "updated";
+        } else {
+          result = await foundryClient.createDocument("Setting", [{ key, value: serialized }]);
+          action = "created";
+        }
+
+        return successResponse({ action, key, value, result });
+      } catch (error) {
+        return errorResponse(
+          `Error setting '${args?.key}': ${error instanceof Error ? error.message : String(error)}`
         );
       }
     }
