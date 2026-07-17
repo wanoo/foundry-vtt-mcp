@@ -7,9 +7,12 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
+  ListResourcesRequestSchema,
+  ReadResourceRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { FoundryClient } from "./foundry-client.js";
 import { createToolDefinitions, createToolHandler } from "./server-tools.js";
+import { createResourceHandlers } from "./server-resources.js";
 
 // Get the directory of this file to locate INSTRUCTIONS.md
 const __filename = fileURLToPath(import.meta.url);
@@ -44,6 +47,8 @@ const server = new Server(
   {
     capabilities: {
       tools: {},
+      resources: {},
+      logging: {},
     },
   }
 );
@@ -54,6 +59,36 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
 });
 
 server.setRequestHandler(CallToolRequestSchema, createToolHandler(foundryClient));
+
+// Ressources MCP : documents Foundry parcourables (list paginé, read par URI).
+const resources = createResourceHandlers(foundryClient);
+server.setRequestHandler(ListResourcesRequestSchema, async (req) => {
+  return resources.list(req.params?.cursor);
+});
+server.setRequestHandler(ReadResourceRequestSchema, async (req) => {
+  return resources.read(req.params.uri);
+});
+
+// Notifications : chaque broadcast Foundry bufferisé part en notification de
+// logging MCP (payload allégé — le détail se lit via get_events).
+foundryClient.onEvent = (e) => {
+  const first = e.args[0] as Record<string, unknown> | undefined;
+  void server
+    .sendLoggingMessage({
+      level: "info",
+      logger: "foundry-events",
+      data: {
+        seq: e.seq,
+        event: e.event,
+        ...(e.event === "modifyDocument" && first
+          ? { type: first.type, action: first.action }
+          : {}),
+      },
+    })
+    .catch(() => {
+      // transport pas encore prêt ou fermé : sans gravité
+    });
+};
 
 // Start the server
 async function main() {

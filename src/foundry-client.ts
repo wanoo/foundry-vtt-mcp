@@ -378,6 +378,9 @@ export class FoundryClient {
   private static readonly EVENT_ARGS_MAX_CHARS = 60_000;
   private static readonly IGNORED_EVENTS = new Set(["userActivity", "getUserActivity", "time"]);
 
+  /** Callback appelé à chaque événement bufferisé (→ notifications MCP). */
+  public onEvent: ((e: { seq: number; t: number; event: string; args: unknown[] }) => void) | null = null;
+
   private recordEvent(event: string, args: unknown[]): void {
     if (FoundryClient.IGNORED_EVENTS.has(event)) return;
     let stored = args;
@@ -400,6 +403,14 @@ export class FoundryClient {
       }
       return true;
     });
+
+    if (this.onEvent) {
+      try {
+        this.onEvent(entry);
+      } catch {
+        // un callback défaillant ne doit pas casser la réception socket
+      }
+    }
   }
 
   /** Events received after `sinceSeq` (0 = everything buffered), oldest first. */

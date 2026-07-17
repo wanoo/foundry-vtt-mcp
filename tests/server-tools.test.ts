@@ -1094,6 +1094,47 @@ describe("server tools", () => {
     });
   });
 
+  describe("qualité MCP : annotations et pagination", () => {
+    test("chaque outil porte des annotations explicites", () => {
+      const tools = createToolDefinitions() as any[];
+      for (const tool of tools) {
+        expect(tool.annotations).toBeDefined();
+        expect(typeof tool.annotations.readOnlyHint).toBe("boolean");
+        expect(typeof tool.annotations.destructiveHint).toBe("boolean");
+      }
+    });
+
+    test("les lectures sont readOnly, les deletes destructifs", () => {
+      const tools = createToolDefinitions() as any[];
+      const byName = Object.fromEntries(tools.map((t) => [t.name, t.annotations]));
+      expect(byName.get_actors.readOnlyHint).toBe(true);
+      expect(byName.search_journals.readOnlyHint).toBe(true);
+      expect(byName.cc_get_sheet.readOnlyHint).toBe(true);
+      expect(byName.wait_for_message.readOnlyHint).toBe(true);
+      expect(byName.create_document.readOnlyHint).toBe(false);
+      expect(byName.delete_document.destructiveHint).toBe(true);
+      expect(byName.delete_compendium.destructiveHint).toBe(true);
+      expect(byName.modify_document.destructiveHint).toBe(false);
+      expect(byName.roll_ffg_pool.destructiveHint).toBe(false);
+    });
+
+    test("offset/limit paginent les listes", async () => {
+      const docs = Array.from({ length: 10 }, (_, i) => ({ _id: `a${i}`, name: `Actor ${i}` }));
+      const client = {
+        isConnected: () => true,
+        getDocuments: jest.fn().mockResolvedValue(docs),
+      } as any;
+      const handler = createToolHandler(client);
+      const response = await handler({
+        params: { name: "get_actors", arguments: { offset: 3, limit: 4 } },
+      });
+      const body = JSON.parse((response as any).content[0].text);
+      expect(body).toHaveLength(4);
+      expect(body[0]._id).toBe("a3");
+      expect(body[3]._id).toBe("a6");
+    });
+  });
+
   describe("lot 2 : tokens, conditions, demandes de jets", () => {
     const sceneWithTokens = {
       _id: "sc1",

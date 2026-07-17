@@ -18,7 +18,12 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js';
+import {
+  ListToolsRequestSchema,
+  CallToolRequestSchema,
+  ListResourcesRequestSchema,
+  ReadResourceRequestSchema,
+} from '@modelcontextprotocol/sdk/types.js';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const PORT = Number(process.env.PORT || 8080);
@@ -38,6 +43,7 @@ writeFileSync(credsPath, process.env.FOUNDRY_CREDENTIALS_JSON ||
   '[{"_id":"placeholder","hostname":"localhost","userid":"x","password":"x"}]');
 
 let client = null;
+const sessionServers = new Map(); // sessionId -> Server (relais des notifications)
 async function connectBackend() {
   const c = new Client({ name: 'clever-gateway', version: '1.0.0' });
   await c.connect(new StdioClientTransport({
@@ -49,6 +55,17 @@ async function connectBackend() {
     env: { ...process.env, FOUNDRY_CREDENTIALS: credsPath, NODE_OPTIONS: '--max-old-space-size=384' },
     stderr: 'inherit',
   }));
+  // Notifications du backend (événements Foundry) → répliquées vers chaque
+  // session HTTP ouverte (livrées sur leur flux SSE si le client écoute).
+  c.fallbackNotificationHandler = async (notification) => {
+    for (const [sid, srv] of sessionServers) {
+      try {
+        await srv.notification(notification);
+      } catch {
+        sessionServers.delete(sid);
+      }
+    }
+  };
   c.onclose = () => {
     if (client !== c) return; // fermeture d'un ancien client déjà remplacé
     client = null;
@@ -74,13 +91,19 @@ function requireBackend() {
 function makeSession() {
   const server = new Server(
     { name: 'foundry-mcp-clever', version: '1.0.0' },
-    { capabilities: { tools: {} } }
+    { capabilities: { tools: {}, resources: {}, logging: {} } }
   );
-  // Passe-plat : la liste et l'appel d'outils sont relayés au serveur stdio.
+  // Passe-plat : outils ET ressources sont relayés au serveur stdio.
   // requireBackend() relit `client` à chaque appel : les sessions survivent au respawn.
   server.setRequestHandler(ListToolsRequestSchema, async () => requireBackend().listTools());
   server.setRequestHandler(CallToolRequestSchema, async (req) =>
     requireBackend().callTool({ name: req.params.name, arguments: req.params.arguments || {} })
+  );
+  server.setRequestHandler(ListResourcesRequestSchema, async (req) =>
+    requireBackend().listResources({ cursor: req.params?.cursor })
+  );
+  server.setRequestHandler(ReadResourceRequestSchema, async (req) =>
+    requireBackend().readResource({ uri: req.params.uri })
   );
   return server;
 }
@@ -91,12 +114,18 @@ async function handleMcp(req, res) {
   let transport = sid ? sessions.get(sid) : undefined;
   if (!transport) {
     if (req.method !== 'POST') { res.writeHead(400); return res.end('session inconnue'); }
+    const server = makeSession();
     transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: () => randomUUID(),
-      onsessioninitialized: (id) => sessions.set(id, transport),
+      onsessioninitialized: (id) => { sessions.set(id, transport); sessionServers.set(id, server); },
     });
-    transport.onclose = () => { if (transport.sessionId) sessions.delete(transport.sessionId); };
-    await makeSession().connect(transport);
+    transport.onclose = () => {
+      if (transport.sessionId) {
+        sessions.delete(transport.sessionId);
+        sessionServers.delete(transport.sessionId);
+      }
+    };
+    await server.connect(transport);
   }
   return transport.handleRequest(req, res);
 }

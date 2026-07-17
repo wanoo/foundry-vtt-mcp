@@ -47,6 +47,14 @@ export function generateListToolDefinition(config: DocumentTypeConfig) {
           additionalProperties: true,
           description: `Filter ${config.plural} by field values (AND logic). Keys support dotted paths into nested objects and operator suffixes: "field__in" (value must be an array), "field__contains" (case-insensitive substring, or array membership), "field__ne" (not equal), "field__exists" (true/false). Examples: {"folder": "abc123"}, {"flags.campaign-codex.type": "npc"}, {"name__contains": "riar"}, {"_id__in": ["a1", "b2"]}.`,
         },
+        offset: {
+          type: "number",
+          description: `Pagination: skip this many ${config.plural} (after filtering) before returning results. Combine with limit.`,
+        },
+        limit: {
+          type: "number",
+          description: `Pagination: return at most this many ${config.plural}. Prefer offset/limit over max_length for paging through large collections.`,
+        },
       },
       required: [],
     },
@@ -947,7 +955,33 @@ export function createToolDefinitions() {
     ccLinkTool,
     getEventsTool,
     waitForMessageTool,
-  ];
+  ].map(withAnnotations);
+}
+
+// --- Annotations MCP (spec 2025-03-26) -----------------------------------------
+// readOnlyHint : les clients peuvent auto-approuver ces outils sans risque.
+// destructiveHint : défaut spec = true → on le fixe EXPLICITEMENT partout ;
+// seuls les deletes irréversibles restent destructifs.
+const READ_ONLY_EXTRA = new Set([
+  "search_journals", "browse_files", "show_credentials",
+  "cc_list_sheets", "cc_get_sheet", "wait_for_message",
+]);
+const DESTRUCTIVE_TOOLS = new Set(["delete_document", "delete_compendium"]);
+
+function withAnnotations<T extends { name: string }>(def: T): T & {
+  annotations: { readOnlyHint: boolean; destructiveHint: boolean };
+} {
+  const readOnly =
+    def.name.startsWith("get_") ||
+    def.name.startsWith("list_") ||
+    READ_ONLY_EXTRA.has(def.name);
+  return {
+    ...def,
+    annotations: {
+      readOnlyHint: readOnly,
+      destructiveHint: DESTRUCTIVE_TOOLS.has(def.name),
+    },
+  };
 }
 
 export function errorResponse(message: string) {
@@ -980,11 +1014,18 @@ export function createToolHandler(foundryClient: FoundryClient) {
           const requestedFields = args?.requested_fields as string[] | undefined;
           const where = args?.where as Record<string, unknown> | undefined;
 
-          const docs = await foundryClient.getDocuments(config.collection, {
+          let docs = await foundryClient.getDocuments(config.collection, {
             maxLength: maxLength || null,
             requestedFields: requestedFields || null,
             where: where || null,
           });
+
+          // Pagination offset/limit (après filtrage, avant envoi).
+          const offset = (args?.offset as number | undefined) ?? 0;
+          const limit = args?.limit as number | undefined;
+          if (offset > 0 || limit !== undefined) {
+            docs = docs.slice(offset, limit !== undefined ? offset + limit : undefined);
+          }
 
           return successResponse(docs);
         } catch (error) {

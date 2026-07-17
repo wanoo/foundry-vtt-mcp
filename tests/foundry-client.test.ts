@@ -666,6 +666,20 @@ describe("FoundryClient", () => {
       expect(past).toBe("found");
     });
 
+    test("onEvent callback fires for each recorded event and survives errors", () => {
+      const { client } = createClient();
+      const seen: string[] = [];
+      client.onEvent = (e) => {
+        seen.push(e.event);
+        throw new Error("boom"); // ne doit pas casser la réception
+      };
+      (client as any).recordEvent("pause", [true]);
+      (client as any).recordEvent("userActivity", []); // ignoré
+      (client as any).recordEvent("modifyDocument", [{ type: "ChatMessage" }]);
+      expect(seen).toEqual(["pause", "modifyDocument"]);
+      expect(client.getEvents().events).toHaveLength(2);
+    });
+
     test("event buffer truncates oversized args", () => {
       const { client } = createClient();
       (client as any).recordEvent("modifyDocument", [{ big: "x".repeat(70_000) }]);
