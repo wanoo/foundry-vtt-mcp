@@ -11,8 +11,9 @@ import {
   ReadResourceRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { FoundryClient } from "./foundry-client.js";
-import { createToolDefinitions, createToolHandler } from "./server-tools.js";
+import { createToolDefinitions, createToolHandler, withAnnotations } from "./server-tools.js";
 import { createResourceHandlers } from "./server-resources.js";
+import { loadSystemModules } from "./systems/index.js";
 
 // Get the directory of this file to locate INSTRUCTIONS.md
 const __filename = fileURLToPath(import.meta.url);
@@ -53,12 +54,34 @@ const server = new Server(
   }
 );
 
-// List available tools
+// Modules système (starwarsffg…) : outils spécifiques au jeu, chargés selon
+// FOUNDRY_SYSTEMS (défaut : tous les modules embarqués). Cf. systems/README.md.
+const systemModules = loadSystemModules(process.env);
+const systemHandlers = systemModules.map((m) => m.createHandler(foundryClient));
+if (systemModules.length) {
+  console.error(`[FoundryMCP] System modules: ${systemModules.map((m) => m.id).join(", ")}`);
+}
+
+// List available tools (cœur générique + modules système, tous annotés)
 server.setRequestHandler(ListToolsRequestSchema, async () => {
-  return { tools: createToolDefinitions() };
+  return {
+    tools: [
+      ...createToolDefinitions(),
+      ...systemModules.flatMap((m) => m.tools.map(withAnnotations)),
+    ],
+  };
 });
 
-server.setRequestHandler(CallToolRequestSchema, createToolHandler(foundryClient));
+const coreToolHandler = createToolHandler(foundryClient);
+server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  // Les modules système répondent d'abord (test de nom bon marché),
+  // le cœur générique ensuite.
+  for (const handler of systemHandlers) {
+    const response = await handler(request);
+    if (response !== undefined) return response;
+  }
+  return coreToolHandler(request);
+});
 
 // Ressources MCP : documents Foundry parcourables (list paginé, read par URI).
 const resources = createResourceHandlers(foundryClient);

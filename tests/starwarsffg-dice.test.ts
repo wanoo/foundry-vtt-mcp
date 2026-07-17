@@ -1,4 +1,4 @@
-import { rollFfgPool, formatPool, formatResult } from "../src/core/ffg-dice.js";
+import { rollFfgPool, formatPool, formatResult } from "../src/systems/starwarsffg/dice.js";
 
 describe("ffg-dice", () => {
   // rng déterministe : renvoie les valeurs données en séquence

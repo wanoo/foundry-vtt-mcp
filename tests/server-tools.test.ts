@@ -1115,7 +1115,7 @@ describe("server tools", () => {
       expect(byName.delete_document.destructiveHint).toBe(true);
       expect(byName.delete_compendium.destructiveHint).toBe(true);
       expect(byName.modify_document.destructiveHint).toBe(false);
-      expect(byName.roll_ffg_pool.destructiveHint).toBe(false);
+      expect(byName.draw_from_table.destructiveHint).toBe(false);
     });
 
     test("offset/limit paginent les listes", async () => {
@@ -1132,6 +1132,71 @@ describe("server tools", () => {
       expect(body).toHaveLength(4);
       expect(body[0]._id).toBe("a3");
       expect(body[3]._id).toBe("a6");
+    });
+  });
+
+  describe("draw_from_table", () => {
+    const critTable = {
+      _id: "tb1",
+      name: "🩸 Blessures critiques (d100)",
+      formula: "1d100",
+      results: [
+        { _id: "r1", range: [1, 9], description: "Stress mécanique · Facile" },
+        { _id: "r2", range: [10, 100], description: "Plus grave" },
+      ],
+    };
+
+    test("tire, sélectionne par plage et poste en chat", async () => {
+      const client = {
+        isConnected: () => true,
+        getUserId: () => "bot1",
+        getDocument: jest.fn().mockResolvedValue(critTable),
+        createDocument: jest.fn().mockResolvedValue({ ok: true }),
+      } as any;
+      const handler = createToolHandler(client);
+      const response = await handler({
+        params: { name: "draw_from_table", arguments: { table: "tb1" } },
+      });
+      const body = JSON.parse((response as any).content[0].text);
+      expect(body.draws).toHaveLength(1);
+      const d = body.draws[0];
+      expect(d.roll).toBeGreaterThanOrEqual(1);
+      expect(d.roll).toBeLessThanOrEqual(100);
+      expect(d.text).toBe(d.roll <= 9 ? "Stress mécanique · Facile" : "Plus grave");
+      expect(body.posted).toBe(true);
+      expect(client.createDocument).toHaveBeenCalledWith("ChatMessage", [
+        expect.objectContaining({ author: "bot1", content: expect.stringContaining(critTable.name) }),
+      ]);
+    });
+
+    test("modificateur appliqué et tirages multiples sans post", async () => {
+      const client = {
+        isConnected: () => true,
+        getUserId: () => "bot1",
+        getDocument: jest.fn().mockResolvedValue(critTable),
+        createDocument: jest.fn(),
+      } as any;
+      const handler = createToolHandler(client);
+      const response = await handler({
+        params: { name: "draw_from_table", arguments: { table: "tb1", modifier: 50, rolls: 3, post: false } },
+      });
+      const body = JSON.parse((response as any).content[0].text);
+      expect(body.draws).toHaveLength(3);
+      for (const d of body.draws) {
+        expect(d.roll).toBeGreaterThanOrEqual(51);
+        expect(d.text).toBe(d.roll <= 100 ? "Plus grave" : null);
+      }
+      expect(client.createDocument).not.toHaveBeenCalled();
+    });
+
+    test("formule non supportée → erreur explicite", async () => {
+      const client = {
+        isConnected: () => true,
+        getDocument: jest.fn().mockResolvedValue({ ...critTable, formula: "1d20+@fx" }),
+      } as any;
+      const handler = createToolHandler(client);
+      const response = await handler({ params: { name: "draw_from_table", arguments: { table: "tb1" } } });
+      expect((response as any).isError).toBe(true);
     });
   });
 
@@ -1152,7 +1217,7 @@ describe("server tools", () => {
         "move_token",
         "update_token",
         "toggle_actor_condition",
-        "request_player_roll",
+        "draw_from_table",
       ]) {
         expect(tools.find((tool) => tool.name === name)).toBeDefined();
       }
@@ -1281,34 +1346,6 @@ describe("server tools", () => {
       expect((response as any).isError).toBe(true);
     });
 
-    test("request_player_roll posts an FFG pool chat message", async () => {
-      const client = {
-        isConnected: () => true,
-        getUserId: () => "bot1",
-        createDocument: jest.fn().mockResolvedValue({ ok: true }),
-      } as any;
-      const handler = createToolHandler(client);
-      const response = await handler({
-        params: {
-          name: "request_player_roll",
-          arguments: { description: "Test de Peur", difficulty: 2, challenge: 1, skill_name: "Discipline" },
-        },
-      });
-      expect(client.createDocument).toHaveBeenCalledWith("ChatMessage", [
-        expect.objectContaining({
-          author: "bot1",
-          content: expect.stringContaining("ffg-pool-to-player"),
-          flags: {
-            starwarsffg: expect.objectContaining({
-              dicePool: { difficulty: 2, challenge: 1 },
-              description: "Test de Peur",
-              roll: expect.objectContaining({ skillName: "Discipline" }),
-            }),
-          },
-        }),
-      ]);
-      expect((response as any).isError).toBeUndefined();
-    });
 
     test("control_playlist stop mirrors Playlist#stopAll", async () => {
       const client = {
@@ -1405,23 +1442,6 @@ describe("server tools", () => {
       ], { parentUuid: "Scene.sc1" });
     });
 
-    test("roll_ffg_pool posts a chat message with the result", async () => {
-      const client = {
-        isConnected: () => true,
-        getUserId: () => "bot1",
-        createDocument: jest.fn().mockResolvedValue({ ok: true }),
-      } as any;
-      const handler = createToolHandler(client);
-      const response = await handler({
-        params: { name: "roll_ffg_pool", arguments: { description: "Perception", ability: 2, difficulty: 1 } },
-      });
-      expect(client.createDocument).toHaveBeenCalledWith("ChatMessage", [
-        expect.objectContaining({ author: "bot1", content: expect.stringContaining("Perception") }),
-      ]);
-      const body = JSON.parse((response as any).content[0].text);
-      expect(body.detail).toHaveProperty("netSuccesses");
-      expect(body.posted).toBe(true);
-    });
 
     test("cc_create_sheet builds the npc flag structure", async () => {
       const client = {
@@ -1503,22 +1523,5 @@ describe("server tools", () => {
       expect(body.timeout).toBe(true);
     });
 
-    test("request_player_roll supports whisper", async () => {
-      const client = {
-        isConnected: () => true,
-        getUserId: () => "bot1",
-        createDocument: jest.fn().mockResolvedValue({ ok: true }),
-      } as any;
-      const handler = createToolHandler(client);
-      await handler({
-        params: {
-          name: "request_player_roll",
-          arguments: { description: "Perception", ability: 2, whisper_users: ["u1"] },
-        },
-      });
-      expect(client.createDocument).toHaveBeenCalledWith("ChatMessage", [
-        expect.objectContaining({ whisper: ["u1"] }),
-      ]);
-    });
   });
 });

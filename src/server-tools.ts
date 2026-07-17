@@ -1,7 +1,6 @@
 import type { FoundryClient } from "./foundry-client.js";
 import { canUseIndex } from "./core/collections.js";
 import { filterDocumentsByWhere } from "./core/document-utils.js";
-import { rollFfgPool, formatPool, formatResult, type FfgPool } from "./core/ffg-dice.js";
 
 export interface DocumentTypeConfig {
   singular: string;
@@ -694,33 +693,20 @@ const toggleActorConditionTool = {
   },
 };
 
-const requestPlayerRollTool = {
-  name: "request_player_roll",
+const drawFromTableTool = {
+  name: "draw_from_table",
   description:
-    "Post a Star Wars FFG roll request in chat: a message with a '🎲' button that opens the FFG dice-pool dialog pre-filled for the player who clicks it (system flag ffg-pool-to-player). starwarsffg only.",
+    "Draw from a RollTable server-side: rolls the table's formula (NdM±k), picks the matching range result, and posts it to chat. Perfect for critical-injury d100 tables. Enriched links (@UUID) render on the players' clients.",
   inputSchema: {
     type: "object",
     properties: {
-      description: { type: "string", description: `Short label of the check (e.g. "Test de Peur", "Perception moyenne")` },
-      content: {
-        type: "string",
-        description: "Optional HTML shown above the button (context, stakes, spending guide). The button is appended automatically.",
-      },
-      difficulty: { type: "number", description: "Difficulty dice [di] (default 0)" },
-      challenge: { type: "number", description: "Challenge dice [ch] (default 0)" },
-      ability: { type: "number", description: "Ability dice [ab] added to the player's pool (default 0)" },
-      proficiency: { type: "number", description: "Proficiency dice [pr] (default 0)" },
-      boost: { type: "number", description: "Boost dice [bo] (default 0)" },
-      setback: { type: "number", description: "Setback dice [se] (default 0)" },
-      force: { type: "number", description: "Force dice [fo] (default 0)" },
-      skill_name: { type: "string", description: "Skill name displayed in the roll dialog (default: the description)" },
-      whisper_users: {
-        type: "array",
-        items: { type: "string" },
-        description: "Optional user _ids to whisper the request to (default: public message)",
-      },
+      table: { type: "string", description: "RollTable _id or name" },
+      modifier: { type: "number", description: "Flat modifier added to the roll (e.g. +10 per previous critical injury)" },
+      rolls: { type: "number", description: "Number of draws (default 1, max 10)" },
+      post: { type: "boolean", description: "Post the draw(s) to chat (default true)" },
+      whisper_users: { type: "array", items: { type: "string" }, description: "Whisper to these user _ids" },
     },
-    required: ["description"],
+    required: ["table"],
   },
 };
 
@@ -779,24 +765,6 @@ const placeTokenTool = {
       scene_name: { type: "string", description: "Scene name (alternative to scene_id)" },
     },
     required: ["actor", "x", "y"],
-  },
-};
-
-const rollFfgPoolTool = {
-  name: "roll_ffg_pool",
-  description:
-    "Roll a Star Wars FFG narrative dice pool SERVER-SIDE (official die faces) and post the result to chat. Autonomous — no GM browser needed. For a roll made BY a player, prefer request_player_roll.",
-  inputSchema: {
-    type: "object",
-    properties: {
-      description: { type: "string", description: `What the roll is (e.g. "Perception d'Uchebe")` },
-      ability: { type: "number" }, proficiency: { type: "number" },
-      difficulty: { type: "number" }, challenge: { type: "number" },
-      boost: { type: "number" }, setback: { type: "number" }, force: { type: "number" },
-      post: { type: "boolean", description: "Post the result to chat (default true)" },
-      whisper_users: { type: "array", items: { type: "string" }, description: "Whisper the chat message to these user _ids" },
-    },
-    required: ["description"],
   },
 };
 
@@ -944,11 +912,10 @@ export function createToolDefinitions() {
     moveTokenTool,
     updateTokenTool,
     toggleActorConditionTool,
-    requestPlayerRollTool,
     controlPlaylistTool,
     manageCombatTool,
     placeTokenTool,
-    rollFfgPoolTool,
+    drawFromTableTool,
     ccListSheetsTool,
     ccGetSheetTool,
     ccCreateSheetTool,
@@ -968,7 +935,7 @@ const READ_ONLY_EXTRA = new Set([
 ]);
 const DESTRUCTIVE_TOOLS = new Set(["delete_document", "delete_compendium"]);
 
-function withAnnotations<T extends { name: string }>(def: T): T & {
+export function withAnnotations<T extends { name: string }>(def: T): T & {
   annotations: { readOnlyHint: boolean; destructiveHint: boolean };
 } {
   const readOnly =
@@ -1801,50 +1768,6 @@ export function createToolHandler(foundryClient: FoundryClient) {
       }
     }
 
-    if (name === "request_player_roll") {
-      try {
-        const description = args?.description as string | undefined;
-        if (!description) {
-          return errorResponse("Error: 'description' is required");
-        }
-        const pool: Record<string, number> = {};
-        for (const die of ["difficulty", "challenge", "ability", "proficiency", "boost", "setback", "force"]) {
-          const n = args?.[die] as number | undefined;
-          if (n) pool[die] = n;
-        }
-        const body = (args?.content as string | undefined) ?? `<h3>🎲 ${description}</h3>`;
-        const whisper = (args?.whisper_users as string[] | undefined) ?? [];
-
-        // Format vérifié dans le système starwarsffg (bouton .ffg-pool-to-player) :
-        // le clic ouvre le dialogue de jet FFG pré-rempli avec dicePool.
-        const message: Record<string, unknown> = {
-          content: `${body}\n<button class="ffg-pool-to-player">🎲 Lancer — ${description}</button>`,
-          author: foundryClient.getUserId(),
-          flags: {
-            starwarsffg: {
-              dicePool: pool,
-              description,
-              roll: {
-                data: {},
-                skillName: (args?.skill_name as string | undefined) ?? description,
-                item: {},
-                flavor: "",
-                sound: null,
-              },
-            },
-          },
-        };
-        if (whisper.length) message.whisper = whisper;
-
-        const result = await foundryClient.createDocument("ChatMessage", [message]);
-        return successResponse({ posted: description, pool, whisper: whisper.length ? whisper : "public", result });
-      } catch (error) {
-        return errorResponse(
-          `Error posting roll request: ${error instanceof Error ? error.message : String(error)}`
-        );
-      }
-    }
-
     if (name === "control_playlist") {
       try {
         const playlistArg = args?.playlist as string | undefined;
@@ -2098,41 +2021,6 @@ export function createToolHandler(foundryClient: FoundryClient) {
       }
     }
 
-    if (name === "roll_ffg_pool") {
-      try {
-        const description = args?.description as string | undefined;
-        if (!description) return errorResponse("Error: 'description' is required");
-        const pool: FfgPool = {};
-        for (const die of ["ability", "proficiency", "difficulty", "challenge", "boost", "setback", "force"] as const) {
-          const n = args?.[die] as number | undefined;
-          if (n) pool[die] = n;
-        }
-        const roll = rollFfgPool(pool);
-        const summary = formatResult(roll);
-
-        let posted = false;
-        if ((args?.post as boolean | undefined) ?? true) {
-          const whisper = (args?.whisper_users as string[] | undefined) ?? [];
-          const facesHtml = Object.entries(roll.faces)
-            .map(([die, faces]) => `<em>${die}</em> : ${faces.join(", ")}`)
-            .join("<br>");
-          const message: Record<string, unknown> = {
-            content: `<h3>🎲 ${description}</h3><p>${formatPool(pool)}</p><p><strong>${summary}</strong></p><p style="font-size:.85em">${facesHtml}</p>`,
-            author: foundryClient.getUserId(),
-            flags: { "foundry-mcp": { roll: { pool, result: roll } } },
-          };
-          if (whisper.length) message.whisper = whisper;
-          await foundryClient.createDocument("ChatMessage", [message]);
-          posted = true;
-        }
-        return successResponse({ description, pool: formatPool(pool), summary, detail: roll, posted });
-      } catch (error) {
-        return errorResponse(
-          `Error rolling FFG pool: ${error instanceof Error ? error.message : String(error)}`
-        );
-      }
-    }
-
     if (name === "cc_list_sheets" || name === "cc_get_sheet") {
       try {
         if (name === "cc_get_sheet") {
@@ -2275,6 +2163,66 @@ export function createToolHandler(foundryClient: FoundryClient) {
       } catch (error) {
         return errorResponse(
           `Error linking Campaign Codex sheets: ${error instanceof Error ? error.message : String(error)}`
+        );
+      }
+    }
+
+    if (name === "draw_from_table") {
+      try {
+        const tableArg = args?.table as string | undefined;
+        if (!tableArg) return errorResponse("Error: 'table' is required");
+        const table = await foundryClient.getDocument("tables", { _id: tableArg, name: tableArg }, {})
+          ?? await foundryClient.getDocument("tables", { name: tableArg }, {});
+        if (!table) return errorResponse(`Error: RollTable not found: ${tableArg}`);
+
+        const formula = ((table.formula as string) || "1d100").replace(/\s+/g, "");
+        const match = formula.match(/^(\d+)d(\d+)([+-]\d+)?$/i);
+        if (!match) {
+          return errorResponse(`Error: Unsupported table formula '${formula}' (expected NdM±k)`);
+        }
+        const [, nStr, mStr, kStr] = match;
+        const modifier = (args?.modifier as number | undefined) ?? 0;
+        const results = (table.results as Record<string, unknown>[] | undefined) ?? [];
+        const rolls = Math.min(Math.max((args?.rolls as number | undefined) ?? 1, 1), 10);
+
+        const draws: Array<Record<string, unknown>> = [];
+        for (let i = 0; i < rolls; i++) {
+          let roll = parseInt(kStr ?? "0", 10) + modifier;
+          for (let d = 0; d < parseInt(nStr, 10); d++) {
+            roll += 1 + Math.floor(Math.random() * parseInt(mStr, 10));
+          }
+          const hit = results.find((r) => {
+            const range = r.range as [number, number] | undefined;
+            return range && roll >= range[0] && roll <= range[1];
+          });
+          draws.push({
+            roll,
+            range: hit?.range ?? null,
+            // v13 : le texte vit dans description ; text/name = anciens formats.
+            text: (hit?.description as string) ?? (hit?.text as string) ?? (hit?.name as string) ?? null,
+            documentUuid: hit?.documentUuid ?? null,
+          });
+        }
+
+        let posted = false;
+        if ((args?.post as boolean | undefined) ?? true) {
+          const whisper = (args?.whisper_users as string[] | undefined) ?? [];
+          const body = draws
+            .map((d) => `<p><strong>${d.roll}</strong>${modifier ? ` (dont ${modifier >= 0 ? "+" : ""}${modifier})` : ""} → ${d.text ?? "<em>hors table</em>"}</p>`)
+            .join("\n");
+          const message: Record<string, unknown> = {
+            content: `<h3>🎲 ${table.name}</h3>\n${body}`,
+            author: foundryClient.getUserId(),
+            flags: { "foundry-mcp": { tableDraw: { table: table._id, draws } } },
+          };
+          if (whisper.length) message.whisper = whisper;
+          await foundryClient.createDocument("ChatMessage", [message]);
+          posted = true;
+        }
+        return successResponse({ table: { _id: table._id, name: table.name }, formula, modifier, draws, posted });
+      } catch (error) {
+        return errorResponse(
+          `Error drawing from table: ${error instanceof Error ? error.message : String(error)}`
         );
       }
     }
