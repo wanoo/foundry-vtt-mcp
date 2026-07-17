@@ -823,11 +823,17 @@ export class FoundryClient {
     // the FULL where filter is re-applied client-side below regardless.
     // Light listings (_id/name only) use the database INDEX: on big collections
     // (e.g. thousands of journals) this avoids shipping full document sources.
-    const docs = await this.fetchCollection(
-      collection,
-      extractPushdownQuery(where),
-      canUseIndex(requestedFields, where)
-    );
+    const pushdown = extractPushdownQuery(where);
+    const useIndex = canUseIndex(requestedFields, where);
+    let docs = await this.fetchCollection(collection, pushdown, useIndex);
+    // Some types return unusable index entries (v13 User index = empty objects):
+    // detect and retry with full documents.
+    if (useIndex && docs.length && docs.some((d) => d._id === undefined)) {
+      this.logger.error(
+        `[FoundryClient] index entries for ${collection} lack _id - retrying with full documents`
+      );
+      docs = await this.fetchCollection(collection, pushdown, false);
+    }
 
     // Apply where filter first
     let filteredDocs = this.filterDocumentsByWhere(docs, where);

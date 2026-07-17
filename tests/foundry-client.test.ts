@@ -598,6 +598,34 @@ describe("FoundryClient", () => {
       expect(docs).toEqual([{ _id: "1", name: "A" }]);
     });
 
+    test("retries with full documents when index entries are unusable", async () => {
+      const { client, logger } = createClient();
+      const send = jest
+        .spyOn(client as any, "sendModifyDocumentRequest")
+        .mockResolvedValueOnce({ action: "get", result: [{}, {}] }) // index vide (bug User v13)
+        .mockResolvedValueOnce({ action: "get", result: [{ _id: "u1", name: "Edeker" }] });
+
+      const docs = await client.getDocuments("users", { requestedFields: ["_id", "name"] });
+
+      expect(send).toHaveBeenCalledTimes(2);
+      expect(send.mock.calls[0][2]).toMatchObject({ index: true });
+      expect(send.mock.calls[1][2]).toMatchObject({ index: false });
+      expect(docs).toEqual([{ _id: "u1", name: "Edeker" }]);
+      expect(logger.error).toHaveBeenCalledWith(expect.stringContaining("lack _id"));
+    });
+
+    test("keeps index results when they are usable", async () => {
+      const { client } = createClient();
+      const send = jest
+        .spyOn(client as any, "sendModifyDocumentRequest")
+        .mockResolvedValue({ action: "get", result: [{ _id: "j1", name: "Halyard" }] });
+
+      const docs = await client.getDocuments("journal", { requestedFields: ["_id", "name"] });
+      expect(send).toHaveBeenCalledTimes(1);
+      expect(send.mock.calls[0][2]).toMatchObject({ index: true });
+      expect(docs).toEqual([{ _id: "j1", name: "Halyard" }]);
+    });
+
     test("getSettings delegates to getDocuments('settings')", async () => {
       const { client } = createClient();
       const getDocs = jest.spyOn(client, "getDocuments").mockResolvedValue([{ _id: "s1", key: "core.x" } as any]);
