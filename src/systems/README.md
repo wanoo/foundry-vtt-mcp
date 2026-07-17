@@ -15,7 +15,14 @@ src/systems/
   starwarsffg/        reference implementation (Star Wars FFG)
     index.ts          tool definitions + handler
     dice.ts           narrative dice evaluation (official faces, injectable rng)
+    derived.ts        sheet-derivation engine (stored values + attribute mods)
+  dnd5e/              D&D 5e (d20 engine, checks/saves/skills, stat adjustments)
+  daggerheart/        Daggerheart (Duality Dice per the SRD, traits, resources)
 ```
+
+**Naming**: prefix your tools with the system id (`dnd5e_roll_check`,
+`dh_roll_duality`) so several modules can be loaded at once without
+collisions. The starwarsffg tools keep their historical unprefixed names.
 
 ## Writing a module
 

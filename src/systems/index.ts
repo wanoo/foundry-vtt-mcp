@@ -4,8 +4,14 @@
 // systèmes voulus, FOUNDRY_SYSTEMS="" les désactive tous.
 import type { SystemToolModule } from "./types.js";
 import { starwarsffgModule } from "./starwarsffg/index.js";
+import { dnd5eModule } from "./dnd5e/index.js";
+import { daggerheartModule } from "./daggerheart/index.js";
 
-export const ALL_SYSTEM_MODULES: SystemToolModule[] = [starwarsffgModule];
+export const ALL_SYSTEM_MODULES: SystemToolModule[] = [
+  starwarsffgModule,
+  dnd5eModule,
+  daggerheartModule,
+];
 
 export function loadSystemModules(env: NodeJS.ProcessEnv = process.env): SystemToolModule[] {
   const wanted = env.FOUNDRY_SYSTEMS;

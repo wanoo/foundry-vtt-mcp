@@ -11,8 +11,17 @@ describe("systems registry", () => {
   test("FOUNDRY_SYSTEMS restreint la sélection", () => {
     expect(loadSystemModules({ FOUNDRY_SYSTEMS: "starwarsffg" } as any).map((m) => m.id))
       .toEqual(["starwarsffg"]);
-    expect(loadSystemModules({ FOUNDRY_SYSTEMS: "dnd5e" } as any)).toEqual([]);
+    expect(loadSystemModules({ FOUNDRY_SYSTEMS: "dnd5e" } as any).map((m) => m.id))
+      .toEqual(["dnd5e"]);
+    expect(loadSystemModules({ FOUNDRY_SYSTEMS: "pf2e" } as any)).toEqual([]);
     expect(loadSystemModules({ FOUNDRY_SYSTEMS: "" } as any)).toEqual([]);
+  });
+
+  test("trois modules embarqués, outils préfixés sans collision", () => {
+    const ids = ALL_SYSTEM_MODULES.map((m) => m.id);
+    expect(ids).toEqual(["starwarsffg", "dnd5e", "daggerheart"]);
+    const names = ALL_SYSTEM_MODULES.flatMap((m) => m.tools.map((t) => t.name));
+    expect(new Set(names).size).toBe(names.length);
   });
 });
 
