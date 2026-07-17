@@ -19,7 +19,7 @@ import {
   truncateDocuments,
 } from "./core/document-utils.js";
 import { buildDocumentOperation } from "./core/operations.js";
-import { COLLECTION_TO_TYPE, extractPushdownQuery } from "./core/collections.js";
+import { COLLECTION_TO_TYPE, canUseIndex, extractPushdownQuery } from "./core/collections.js";
 import {
   buildModifyDocumentMessage,
   ENGINE_PONG,
@@ -762,12 +762,13 @@ export class FoundryClient {
    */
   private async getCollection(
     type: string,
-    query: Record<string, unknown> = {}
+    query: Record<string, unknown> = {},
+    index = false
   ): Promise<Record<string, unknown>[]> {
     const response = await this.sendModifyDocumentRequest(
       type,
       "get",
-      { query, action: "get", broadcast: false, index: false },
+      { query, action: "get", broadcast: false, index },
       `Timeout waiting for getCollection response (30s) for ${type}`,
       (responseData) => responseData.action === "get",
       "getCollection"
@@ -785,12 +786,13 @@ export class FoundryClient {
    */
   private async fetchCollection(
     collection: string,
-    query: Record<string, unknown>
+    query: Record<string, unknown>,
+    index = false
   ): Promise<Record<string, unknown>[]> {
     const type = COLLECTION_TO_TYPE[collection];
     if (type) {
       try {
-        return await this.getCollection(type, query);
+        return await this.getCollection(type, query, index);
       } catch (error) {
         this.logger.error(
           `[FoundryClient] per-collection get failed for ${type} (${error instanceof Error ? error.message : error}), falling back to world dump`
@@ -819,7 +821,13 @@ export class FoundryClient {
 
     // Simple top-level equalities go to the server to shrink the payload;
     // the FULL where filter is re-applied client-side below regardless.
-    const docs = await this.fetchCollection(collection, extractPushdownQuery(where));
+    // Light listings (_id/name only) use the database INDEX: on big collections
+    // (e.g. thousands of journals) this avoids shipping full document sources.
+    const docs = await this.fetchCollection(
+      collection,
+      extractPushdownQuery(where),
+      canUseIndex(requestedFields, where)
+    );
 
     // Apply where filter first
     let filteredDocs = this.filterDocumentsByWhere(docs, where);

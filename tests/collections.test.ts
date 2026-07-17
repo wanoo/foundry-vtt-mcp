@@ -12,6 +12,27 @@ describe("collections", () => {
     expect(Object.keys(COLLECTION_TO_TYPE)).toHaveLength(13);
   });
 
+  describe("canUseIndex", () => {
+    const { canUseIndex } = require("../src/core/collections.js");
+
+    test("true for _id/name-only listings", () => {
+      expect(canUseIndex(["_id", "name"], null)).toBe(true);
+      expect(canUseIndex(["name"], { name__contains: "riar" })).toBe(true);
+      expect(canUseIndex(["_id", "name"], { _id__in: ["a"] })).toBe(true);
+    });
+
+    test("false without explicit requested fields (full docs expected)", () => {
+      expect(canUseIndex(null, null)).toBe(false);
+      expect(canUseIndex([], null)).toBe(false);
+    });
+
+    test("false when fields or filters go beyond the index", () => {
+      expect(canUseIndex(["_id", "name", "type"], null)).toBe(false);
+      expect(canUseIndex(["_id", "name"], { folder: "f1" })).toBe(false);
+      expect(canUseIndex(["_id", "name"], { "flags.campaign-codex.type": "npc" })).toBe(false);
+    });
+  });
+
   describe("extractPushdownQuery", () => {
     test("keeps plain top-level equalities", () => {
       expect(extractPushdownQuery({ name: "Riar", folder: "f1" }))
