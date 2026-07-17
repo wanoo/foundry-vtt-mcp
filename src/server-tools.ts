@@ -1,4 +1,7 @@
 import type { FoundryClient } from "./foundry-client.js";
+import { canUseIndex } from "./core/collections.js";
+import { filterDocumentsByWhere } from "./core/document-utils.js";
+import { rollFfgPool, formatPool, formatResult, type FfgPool } from "./core/ffg-dice.js";
 
 export interface DocumentTypeConfig {
   singular: string;
@@ -713,6 +716,192 @@ const requestPlayerRollTool = {
   },
 };
 
+const controlPlaylistTool = {
+  name: "control_playlist",
+  description:
+    "Play or stop a playlist (or a single sound of it) for everyone — same document updates as Foundry's own play/stop buttons. Modes: sequential/shuffle play one sound, simultaneous plays all.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      playlist: { type: "string", description: "Playlist _id or name" },
+      action: { type: "string", enum: ["play", "stop"], description: "play or stop" },
+      sound: { type: "string", description: "Optional sound _id or name to play specifically" },
+    },
+    required: ["playlist", "action"],
+  },
+};
+
+const manageCombatTool = {
+  name: "manage_combat",
+  description:
+    "Manage a combat encounter: create (with tokens from a scene), add_combatants, set_initiative, start, next_turn, next_round, status, end (deletes the combat). Turn order = initiative descending (ties: document order).",
+  inputSchema: {
+    type: "object",
+    properties: {
+      action: {
+        type: "string",
+        enum: ["create", "add_combatants", "set_initiative", "start", "next_turn", "next_round", "status", "end"],
+      },
+      combat_id: { type: "string", description: "Combat _id (default: the first/active combat)" },
+      scene_id: { type: "string", description: "create: scene _id (default: the active scene)" },
+      tokens: {
+        type: "array",
+        items: { type: "string" },
+        description: "create/add_combatants: token _ids or names (default for create: every token of the scene with an actor)",
+      },
+      combatant: { type: "string", description: "set_initiative: combatant _id or name" },
+      initiative: { type: "number", description: "set_initiative: the initiative value" },
+    },
+    required: ["action"],
+  },
+};
+
+const placeTokenTool = {
+  name: "place_token",
+  description:
+    "Place an actor's token on a scene at pixel coordinates, using the actor's prototype token (texture, size, link, disposition).",
+  inputSchema: {
+    type: "object",
+    properties: {
+      actor: { type: "string", description: "Actor _id or name" },
+      x: { type: "number", description: "x position in pixels" },
+      y: { type: "number", description: "y position in pixels" },
+      hidden: { type: "boolean", description: "Place the token hidden (default: prototype setting)" },
+      scene_id: { type: "string", description: "Scene _id (default: the active scene)" },
+      scene_name: { type: "string", description: "Scene name (alternative to scene_id)" },
+    },
+    required: ["actor", "x", "y"],
+  },
+};
+
+const rollFfgPoolTool = {
+  name: "roll_ffg_pool",
+  description:
+    "Roll a Star Wars FFG narrative dice pool SERVER-SIDE (official die faces) and post the result to chat. Autonomous — no GM browser needed. For a roll made BY a player, prefer request_player_roll.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      description: { type: "string", description: `What the roll is (e.g. "Perception d'Uchebe")` },
+      ability: { type: "number" }, proficiency: { type: "number" },
+      difficulty: { type: "number" }, challenge: { type: "number" },
+      boost: { type: "number" }, setback: { type: "number" }, force: { type: "number" },
+      post: { type: "boolean", description: "Post the result to chat (default true)" },
+      whisper_users: { type: "array", items: { type: "string" }, description: "Whisper the chat message to these user _ids" },
+    },
+    required: ["description"],
+  },
+};
+
+// --- Campaign Codex (fiches = JournalEntry + flags["campaign-codex"]) ----------
+// Schéma observé sur le monde (v13, module campaign-codex) : { type, image?, data:{…} }.
+const CC_TYPES = ["npc", "group", "location", "region", "shop", "quest", "tag"];
+const CC_DATA_DEFAULTS: Record<string, Record<string, unknown>> = {
+  npc: { linkedActor: null, description: "", linkedLocations: [], linkedShops: [], associates: [], notes: "", tagMode: false },
+  group: { description: "", associates: [] },
+  location: { description: "", tags: [], widgets: {} },
+  region: { description: "", tags: [] },
+  shop: { description: "", linkedNPCs: [], linkedLocation: null, inventory: [], linkedScene: null, markup: 1, notes: "", inventoryCacheVersion: 1 },
+  quest: { description: "", associates: [], notes: "" },
+  tag: { linkedActor: null, description: "", linkedLocations: [], linkedShops: [], associates: [], notes: "", tagMode: true },
+};
+
+const ccListSheetsTool = {
+  name: "cc_list_sheets",
+  description:
+    `List Campaign Codex sheets (journals carrying flags["campaign-codex"]). Filter by type (${CC_TYPES.join("/")}), tag, or name substring. Returns a light index with link counts.`,
+  inputSchema: {
+    type: "object",
+    properties: {
+      type: { type: "string", enum: CC_TYPES, description: "Restrict to one sheet type" },
+      tag: { type: "string", description: "Restrict to sheets whose data.tags contains this tag" },
+      name_contains: { type: "string", description: "Case-insensitive name filter" },
+    },
+  },
+};
+
+const ccGetSheetTool = {
+  name: "cc_get_sheet",
+  description: "Get one Campaign Codex sheet: type, image, full data (links, tags, notes) and description.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      _id: { type: "string", description: "JournalEntry _id" },
+      name: { type: "string", description: "Sheet name (alternative to _id)" },
+    },
+  },
+};
+
+const ccCreateSheetTool = {
+  name: "cc_create_sheet",
+  description:
+    "Create a Campaign Codex sheet with the correct flag structure for its type (npc/group/location/region/shop/quest/tag). Adds a text page and observer-by-default visibility unless gm_only.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      name: { type: "string", description: "Sheet name" },
+      type: { type: "string", enum: CC_TYPES },
+      description: { type: "string", description: "HTML description (goes in data.description and the text page)" },
+      image: { type: "string", description: "Optional image path/URL for the sheet" },
+      linked_actor: { type: "string", description: "npc/tag: actor _id or name to link (data.linkedActor)" },
+      tags: { type: "array", items: { type: "string" }, description: "location/region: data.tags" },
+      gm_only: { type: "boolean", description: "true = players cannot see it (default false = observer)" },
+    },
+    required: ["name", "type"],
+  },
+};
+
+const ccLinkTool = {
+  name: "cc_link",
+  description:
+    "Link two Campaign Codex sheets (or a sheet to an actor). Relations: associates (default), linkedLocations, linkedShops, linkedNPCs, linkedLocation (single), linkedActor (actor). Use bidirectional to also add the reverse 'associates' link.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      from: { type: "string", description: "Source sheet _id or name" },
+      to: { type: "string", description: "Target sheet _id or name (or actor for linkedActor)" },
+      relation: {
+        type: "string",
+        enum: ["associates", "linkedLocations", "linkedShops", "linkedNPCs", "linkedLocation", "linkedActor"],
+        description: "Relation field on the source sheet (default: associates)",
+      },
+      bidirectional: { type: "boolean", description: "Also add the source to the target's associates (default false)" },
+    },
+    required: ["from", "to"],
+  },
+};
+
+const getEventsTool = {
+  name: "get_events",
+  description:
+    "Read the buffer of socket broadcasts received from Foundry (other clients' writes, chat messages, combat updates...). Use since_seq to poll incrementally: note lastSeq, act, then ask for events after it.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      since_seq: { type: "number", description: "Only events with seq greater than this (default 0 = all buffered)" },
+      event: { type: "string", description: `Filter by socket event name (e.g. "modifyDocument", "pause")` },
+      limit: { type: "number", description: "Keep only the N most recent matches" },
+    },
+  },
+};
+
+const waitForMessageTool = {
+  name: "wait_for_message",
+  description:
+    "Block until a new ChatMessage created by ANOTHER client (player roll, GM message) arrives, or until timeout. Returns the message document(s). Flow: note get_events lastSeq → trigger (e.g. request_player_roll) → wait_for_message with that since_seq.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      where: {
+        type: "object",
+        additionalProperties: true,
+        description: `Optional filter on the message document (same syntax as get_* where, e.g. {"flags.starwarsffg.description__exists": true})`,
+      },
+      timeout_seconds: { type: "number", description: "Max wait (default 60, cap 120 — the HTTP proxy cuts long calls)" },
+      since_seq: { type: "number", description: "Also scan buffered events after this seq (default: only future events)" },
+    },
+  },
+};
+
 export function createToolDefinitions() {
   return [
     ...DOCUMENT_TYPES.flatMap((config) => [
@@ -748,6 +937,16 @@ export function createToolDefinitions() {
     updateTokenTool,
     toggleActorConditionTool,
     requestPlayerRollTool,
+    controlPlaylistTool,
+    manageCombatTool,
+    placeTokenTool,
+    rollFfgPoolTool,
+    ccListSheetsTool,
+    ccGetSheetTool,
+    ccCreateSheetTool,
+    ccLinkTool,
+    getEventsTool,
+    waitForMessageTool,
   ];
 }
 
@@ -910,11 +1109,24 @@ export function createToolHandler(foundryClient: FoundryClient) {
           return errorResponse("Error: 'pack' is required");
         }
 
-        const result = await foundryClient.getPackDocuments(type, pack, {
+        // Index de BDD pour les listings légers (crucial sur les gros packs,
+        // ex. 6849 planètes Astronav) ; repli en sources complètes si les
+        // entrées d'index sont inutilisables.
+        const useIndex = canUseIndex(requestedFields, query);
+        let result = await foundryClient.getPackDocuments(type, pack, {
           query,
           requestedFields,
           maxLength,
+          index: useIndex,
         });
+        if (useIndex && result.length && result.some((d) => d._id === undefined)) {
+          result = await foundryClient.getPackDocuments(type, pack, {
+            query,
+            requestedFields,
+            maxLength,
+            index: false,
+          });
+        }
         return successResponse(result);
       } catch (error) {
         return errorResponse(
@@ -1588,6 +1800,474 @@ export function createToolHandler(foundryClient: FoundryClient) {
       } catch (error) {
         return errorResponse(
           `Error posting roll request: ${error instanceof Error ? error.message : String(error)}`
+        );
+      }
+    }
+
+    if (name === "control_playlist") {
+      try {
+        const playlistArg = args?.playlist as string | undefined;
+        const action = args?.action as string | undefined;
+        if (!playlistArg || !action) {
+          return errorResponse("Error: 'playlist' and 'action' are required");
+        }
+        const playlist = await foundryClient.getDocument(
+          "playlists",
+          { _id: playlistArg, name: playlistArg },
+          {}
+        ) ?? await foundryClient.getDocument("playlists", { name: playlistArg }, {});
+        if (!playlist) return errorResponse(`Error: Playlist not found: ${playlistArg}`);
+        const sounds = ((playlist.sounds as Record<string, unknown>[] | undefined) ?? [])
+          .slice()
+          .sort((a, b) => ((a.sort as number) ?? 0) - ((b.sort as number) ?? 0));
+        const mode = (playlist.mode as number) ?? 0; // -1 soundboard, 0 séquentiel, 1 aléatoire, 2 simultané
+
+        let update: Record<string, unknown>;
+        if (action === "stop") {
+          // Playlist#stopAll : playing:false partout.
+          update = { playing: false, sounds: sounds.map((s) => ({ _id: s._id, playing: false })) };
+        } else {
+          const soundArg = args?.sound as string | undefined;
+          let playingIds: string[];
+          if (soundArg) {
+            const sound = sounds.find((s) => s._id === soundArg || s.name === soundArg);
+            if (!sound) return errorResponse(`Error: Sound not found in playlist: ${soundArg}`);
+            playingIds = [sound._id as string];
+          } else if (mode === 2) {
+            playingIds = sounds.map((s) => s._id as string); // simultané : tout
+          } else if (mode === -1) {
+            return errorResponse("Error: soundboard playlist — provide 'sound'");
+          } else {
+            if (!sounds.length) return errorResponse("Error: playlist has no sounds");
+            playingIds = [sounds[0]._id as string]; // séquentiel/aléatoire : premier
+          }
+          update = {
+            playing: true,
+            sounds: sounds.map((s) => ({ _id: s._id, playing: playingIds.includes(s._id as string) })),
+          };
+        }
+
+        const result = await foundryClient.modifyDocument("Playlist", playlist._id as string, [update]);
+        return successResponse({
+          playlist: { _id: playlist._id, name: playlist.name },
+          action,
+          playing: action === "play"
+            ? sounds.filter((s) => (update.sounds as { _id: unknown; playing: boolean }[])
+                .find((u) => u._id === s._id)?.playing).map((s) => s.name)
+            : [],
+          result,
+        });
+      } catch (error) {
+        return errorResponse(
+          `Error controlling playlist: ${error instanceof Error ? error.message : String(error)}`
+        );
+      }
+    }
+
+    if (name === "manage_combat") {
+      try {
+        const action = args?.action as string | undefined;
+        if (!action) return errorResponse("Error: 'action' is required");
+
+        const sortedCombatants = (combat: Record<string, unknown>) =>
+          ((combat.combatants as Record<string, unknown>[] | undefined) ?? [])
+            .slice()
+            .sort((a, b) => ((b.initiative as number) ?? -Infinity) - ((a.initiative as number) ?? -Infinity));
+
+        const resolveCombat = async (): Promise<Record<string, unknown> | null> => {
+          const combatId = args?.combat_id as string | undefined;
+          if (combatId) return foundryClient.getDocument("combats", { _id: combatId }, {});
+          const combats = (await foundryClient.getDocuments("combats", {})) as Record<string, unknown>[];
+          return combats.find((c) => c.active) ?? combats[0] ?? null;
+        };
+
+        const resolveSceneTokens = async (sceneId?: string) => {
+          const scene = sceneId
+            ? await foundryClient.getDocument("scenes", { _id: sceneId }, { requestedFields: ["_id", "name", "tokens"] })
+            : ((await foundryClient.getDocuments("scenes", { where: { active: true }, requestedFields: ["_id", "name", "tokens"] })) as Record<string, unknown>[])[0];
+          if (!scene) throw new Error("Scene not found (no active scene and none specified)");
+          return scene;
+        };
+
+        if (action === "create") {
+          const scene = await resolveSceneTokens(args?.scene_id as string | undefined);
+          const allTokens = (scene.tokens as Record<string, unknown>[] | undefined) ?? [];
+          const wanted = args?.tokens as string[] | undefined;
+          const tokens = (wanted
+            ? allTokens.filter((t) => wanted.includes(t._id as string) || wanted.includes(t.name as string))
+            : allTokens.filter((t) => t.actorId));
+          const created = await foundryClient.createDocument("Combat", [{ scene: scene._id, active: true }]);
+          const combatId = ((created.result as Record<string, unknown>[] | undefined) ?? [])[0]?._id as string | undefined;
+          if (!combatId) return errorResponse(`Error: Combat creation gave no _id: ${JSON.stringify(created)}`);
+          let combatants: Record<string, unknown> | null = null;
+          if (tokens.length) {
+            combatants = await foundryClient.createDocument(
+              "Combatant",
+              tokens.map((t) => ({ tokenId: t._id, sceneId: scene._id, actorId: t.actorId, hidden: t.hidden ?? false })),
+              { parentUuid: `Combat.${combatId}` }
+            );
+          }
+          return successResponse({ combat: combatId, scene: { _id: scene._id, name: scene.name }, combatants: tokens.map((t) => t.name), result: combatants });
+        }
+
+        const combat = await resolveCombat();
+        if (!combat) return errorResponse("Error: No combat found (create one first)");
+        const combatId = combat._id as string;
+
+        if (action === "add_combatants") {
+          const scene = await resolveSceneTokens((combat.scene as string) ?? undefined);
+          const allTokens = (scene.tokens as Record<string, unknown>[] | undefined) ?? [];
+          const wanted = args?.tokens as string[] | undefined;
+          if (!wanted?.length) return errorResponse("Error: 'tokens' is required");
+          const tokens = allTokens.filter((t) => wanted.includes(t._id as string) || wanted.includes(t.name as string));
+          if (!tokens.length) return errorResponse("Error: none of the tokens were found on the scene");
+          const result = await foundryClient.createDocument(
+            "Combatant",
+            tokens.map((t) => ({ tokenId: t._id, sceneId: scene._id, actorId: t.actorId, hidden: t.hidden ?? false })),
+            { parentUuid: `Combat.${combatId}` }
+          );
+          return successResponse({ combat: combatId, added: tokens.map((t) => t.name), result });
+        }
+
+        if (action === "set_initiative") {
+          const who = args?.combatant as string | undefined;
+          const initiative = args?.initiative as number | undefined;
+          if (!who || initiative === undefined) {
+            return errorResponse("Error: 'combatant' and 'initiative' are required");
+          }
+          const all = (combat.combatants as Record<string, unknown>[] | undefined) ?? [];
+          const target = all.find((c) => c._id === who || c.name === who);
+          if (!target) return errorResponse(`Error: Combatant not found: ${who}`);
+          const result = await foundryClient.modifyDocument("Combatant", target._id as string, [{ initiative }], {
+            parentUuid: `Combat.${combatId}`,
+          });
+          return successResponse({ combat: combatId, combatant: target.name ?? target._id, initiative, result });
+        }
+
+        if (action === "start") {
+          // Combat#startCombat : {round:1, turn:0}.
+          const result = await foundryClient.modifyDocument("Combat", combatId, [{ round: 1, turn: 0 }]);
+          return successResponse({ combat: combatId, started: true, result });
+        }
+
+        if (action === "next_turn" || action === "next_round") {
+          const order = sortedCombatants(combat);
+          const round = (combat.round as number) ?? 0;
+          const turn = (combat.turn as number) ?? 0;
+          let update: Record<string, unknown>;
+          if (action === "next_round" || turn + 1 >= order.length) {
+            update = { round: round + 1, turn: 0 };
+          } else {
+            update = { turn: turn + 1 };
+          }
+          const result = await foundryClient.modifyDocument("Combat", combatId, [update]);
+          const newTurn = (update.turn as number) ?? 0;
+          return successResponse({
+            combat: combatId,
+            round: (update.round as number) ?? round,
+            turn: newTurn,
+            current: order[newTurn]?.name ?? null,
+            result,
+          });
+        }
+
+        if (action === "status") {
+          const order = sortedCombatants(combat);
+          return successResponse({
+            combat: combatId,
+            active: combat.active,
+            round: combat.round,
+            turn: combat.turn,
+            current: order[(combat.turn as number) ?? 0]?.name ?? null,
+            order: order.map((c) => ({ _id: c._id, name: c.name, initiative: c.initiative, defeated: c.defeated })),
+          });
+        }
+
+        if (action === "end") {
+          const result = await foundryClient.deleteDocument("Combat", [combatId]);
+          return successResponse({ combat: combatId, ended: true, result });
+        }
+
+        return errorResponse(`Error: Unknown action '${action}'`);
+      } catch (error) {
+        return errorResponse(
+          `Error managing combat: ${error instanceof Error ? error.message : String(error)}`
+        );
+      }
+    }
+
+    if (name === "place_token") {
+      try {
+        const actorArg = args?.actor as string | undefined;
+        const x = args?.x as number | undefined;
+        const y = args?.y as number | undefined;
+        if (!actorArg || x === undefined || y === undefined) {
+          return errorResponse("Error: 'actor', 'x' and 'y' are required");
+        }
+        const actor = await foundryClient.getDocument(
+          "actors",
+          { _id: actorArg, name: actorArg },
+          { requestedFields: ["_id", "name", "prototypeToken"] }
+        ) ?? await foundryClient.getDocument("actors", { name: actorArg }, { requestedFields: ["_id", "name", "prototypeToken"] });
+        if (!actor) return errorResponse(`Error: Actor not found: ${actorArg}`);
+
+        const sceneId = args?.scene_id as string | undefined;
+        const sceneName = args?.scene_name as string | undefined;
+        const scene = sceneId || sceneName
+          ? await foundryClient.getDocument("scenes", { _id: sceneId, name: sceneName }, { requestedFields: ["_id", "name"] })
+          : ((await foundryClient.getDocuments("scenes", { where: { active: true }, requestedFields: ["_id", "name"] })) as Record<string, unknown>[])[0];
+        if (!scene) return errorResponse("Error: Scene not found (no active scene and none specified)");
+
+        const proto = (actor.prototypeToken as Record<string, unknown> | undefined) ?? {};
+        const tokenData: Record<string, unknown> = {
+          ...proto,
+          name: (proto.name as string) || actor.name,
+          actorId: actor._id,
+          x,
+          y,
+        };
+        if (args?.hidden !== undefined) tokenData.hidden = args.hidden;
+
+        const result = await foundryClient.createDocument("Token", [tokenData], {
+          parentUuid: `Scene.${scene._id}`,
+        });
+        return successResponse({
+          actor: { _id: actor._id, name: actor.name },
+          scene: { _id: scene._id, name: scene.name },
+          x, y,
+          result,
+        });
+      } catch (error) {
+        return errorResponse(
+          `Error placing token: ${error instanceof Error ? error.message : String(error)}`
+        );
+      }
+    }
+
+    if (name === "roll_ffg_pool") {
+      try {
+        const description = args?.description as string | undefined;
+        if (!description) return errorResponse("Error: 'description' is required");
+        const pool: FfgPool = {};
+        for (const die of ["ability", "proficiency", "difficulty", "challenge", "boost", "setback", "force"] as const) {
+          const n = args?.[die] as number | undefined;
+          if (n) pool[die] = n;
+        }
+        const roll = rollFfgPool(pool);
+        const summary = formatResult(roll);
+
+        let posted = false;
+        if ((args?.post as boolean | undefined) ?? true) {
+          const whisper = (args?.whisper_users as string[] | undefined) ?? [];
+          const facesHtml = Object.entries(roll.faces)
+            .map(([die, faces]) => `<em>${die}</em> : ${faces.join(", ")}`)
+            .join("<br>");
+          const message: Record<string, unknown> = {
+            content: `<h3>🎲 ${description}</h3><p>${formatPool(pool)}</p><p><strong>${summary}</strong></p><p style="font-size:.85em">${facesHtml}</p>`,
+            author: foundryClient.getUserId(),
+            flags: { "foundry-mcp": { roll: { pool, result: roll } } },
+          };
+          if (whisper.length) message.whisper = whisper;
+          await foundryClient.createDocument("ChatMessage", [message]);
+          posted = true;
+        }
+        return successResponse({ description, pool: formatPool(pool), summary, detail: roll, posted });
+      } catch (error) {
+        return errorResponse(
+          `Error rolling FFG pool: ${error instanceof Error ? error.message : String(error)}`
+        );
+      }
+    }
+
+    if (name === "cc_list_sheets" || name === "cc_get_sheet") {
+      try {
+        if (name === "cc_get_sheet") {
+          const _id = args?._id as string | undefined;
+          const docName = args?.name as string | undefined;
+          if (!_id && !docName) return errorResponse("Error: Must provide one of: _id or name");
+          const sheet = await foundryClient.getDocument("journal", { _id, name: docName }, {});
+          const cc = (sheet?.flags as Record<string, unknown> | undefined)?.["campaign-codex"] as Record<string, unknown> | undefined;
+          if (!sheet || !cc) return errorResponse("Error: No Campaign Codex sheet found with that identifier");
+          return successResponse({
+            _id: sheet._id,
+            name: sheet.name,
+            type: cc.type,
+            image: cc.image ?? null,
+            data: cc.data ?? {},
+            ownership: sheet.ownership,
+          });
+        }
+
+        const where: Record<string, unknown> = { "flags.campaign-codex__exists": true };
+        if (args?.type) where["flags.campaign-codex.type"] = args.type;
+        if (args?.name_contains) where["name__contains"] = args.name_contains;
+        if (args?.tag) where["flags.campaign-codex.data.tags__contains"] = args.tag;
+        const sheets = (await foundryClient.getDocuments("journal", { where })) as Record<string, unknown>[];
+        const index = sheets.map((s) => {
+          const cc = (s.flags as Record<string, unknown>)["campaign-codex"] as Record<string, unknown>;
+          const data = (cc.data as Record<string, unknown> | undefined) ?? {};
+          const count = (k: string) => (Array.isArray(data[k]) ? (data[k] as unknown[]).length : 0);
+          return {
+            _id: s._id,
+            name: s.name,
+            type: cc.type,
+            tags: data.tags ?? undefined,
+            linkedActor: data.linkedActor ?? undefined,
+            links: count("associates") + count("linkedLocations") + count("linkedShops") + count("linkedNPCs"),
+          };
+        });
+        return successResponse(index);
+      } catch (error) {
+        return errorResponse(
+          `Error on Campaign Codex read: ${error instanceof Error ? error.message : String(error)}`
+        );
+      }
+    }
+
+    if (name === "cc_create_sheet") {
+      try {
+        const sheetName = args?.name as string | undefined;
+        const type = args?.type as string | undefined;
+        if (!sheetName || !type) return errorResponse("Error: 'name' and 'type' are required");
+        if (!CC_DATA_DEFAULTS[type]) {
+          return errorResponse(`Error: Unknown Campaign Codex type '${type}'. Valid: ${CC_TYPES.join(", ")}`);
+        }
+        const description = (args?.description as string | undefined) ?? "";
+        const data: Record<string, unknown> = { ...CC_DATA_DEFAULTS[type], description };
+        if (args?.tags && "tags" in data) data.tags = args.tags;
+        if (args?.linked_actor && "linkedActor" in data) {
+          const actorArg = args.linked_actor as string;
+          const actor = await foundryClient.getDocument("actors", { _id: actorArg, name: actorArg }, { requestedFields: ["_id", "name"] })
+            ?? await foundryClient.getDocument("actors", { name: actorArg }, { requestedFields: ["_id", "name"] });
+          if (!actor) return errorResponse(`Error: linked_actor not found: ${actorArg}`);
+          data.linkedActor = `Actor.${actor._id}`;
+        }
+
+        const flagsCc: Record<string, unknown> = { type, data };
+        if (args?.image) flagsCc.image = args.image;
+        const doc: Record<string, unknown> = {
+          name: sheetName,
+          flags: { "campaign-codex": flagsCc },
+          pages: [{ name: sheetName, type: "text", text: { content: description } }],
+          ownership: { default: (args?.gm_only as boolean | undefined) ? 0 : 2 },
+        };
+        const result = await foundryClient.createDocument("JournalEntry", [doc]);
+        const created = ((result.result as Record<string, unknown>[] | undefined) ?? [])[0];
+        return successResponse({ created: { _id: created?._id, name: sheetName, type }, result });
+      } catch (error) {
+        return errorResponse(
+          `Error creating Campaign Codex sheet: ${error instanceof Error ? error.message : String(error)}`
+        );
+      }
+    }
+
+    if (name === "cc_link") {
+      try {
+        const fromArg = args?.from as string | undefined;
+        const toArg = args?.to as string | undefined;
+        const relation = (args?.relation as string | undefined) ?? "associates";
+        if (!fromArg || !toArg) return errorResponse("Error: 'from' and 'to' are required");
+
+        const getSheet = async (idOrName: string) => {
+          const s = await foundryClient.getDocument("journal", { _id: idOrName, name: idOrName }, {})
+            ?? await foundryClient.getDocument("journal", { name: idOrName }, {});
+          const cc = (s?.flags as Record<string, unknown> | undefined)?.["campaign-codex"] as Record<string, unknown> | undefined;
+          return s && cc ? { sheet: s, cc } : null;
+        };
+        const from = await getSheet(fromArg);
+        if (!from) return errorResponse(`Error: Source sheet not found: ${fromArg}`);
+        const fromData = (from.cc.data as Record<string, unknown> | undefined) ?? {};
+
+        let targetRef: string;
+        let targetLabel: string;
+        if (relation === "linkedActor") {
+          const actor = await foundryClient.getDocument("actors", { _id: toArg, name: toArg }, { requestedFields: ["_id", "name"] })
+            ?? await foundryClient.getDocument("actors", { name: toArg }, { requestedFields: ["_id", "name"] });
+          if (!actor) return errorResponse(`Error: Actor not found: ${toArg}`);
+          targetRef = `Actor.${actor._id}`;
+          targetLabel = actor.name as string;
+        } else {
+          const to = await getSheet(toArg);
+          if (!to) return errorResponse(`Error: Target sheet not found: ${toArg}`);
+          targetRef = `JournalEntry.${to.sheet._id}`;
+          targetLabel = to.sheet.name as string;
+
+          if (args?.bidirectional) {
+            const toData = (to.cc.data as Record<string, unknown> | undefined) ?? {};
+            const reverse = Array.isArray(toData.associates) ? (toData.associates as string[]) : [];
+            const fromRef = `JournalEntry.${from.sheet._id}`;
+            if (!reverse.includes(fromRef)) {
+              await foundryClient.modifyDocument("JournalEntry", to.sheet._id as string, [
+                { flags: { "campaign-codex": { data: { associates: [...reverse, fromRef] } } } },
+              ]);
+            }
+          }
+        }
+
+        let update: Record<string, unknown>;
+        if (relation === "linkedActor" || relation === "linkedLocation") {
+          update = { [relation]: targetRef };
+        } else {
+          const list = Array.isArray(fromData[relation]) ? (fromData[relation] as string[]) : [];
+          if (list.includes(targetRef)) {
+            return successResponse({ from: from.sheet.name, to: targetLabel, relation, unchanged: "already linked" });
+          }
+          update = { [relation]: [...list, targetRef] };
+        }
+        const result = await foundryClient.modifyDocument("JournalEntry", from.sheet._id as string, [
+          { flags: { "campaign-codex": { data: update } } },
+        ]);
+        return successResponse({ from: from.sheet.name, to: targetLabel, relation, bidirectional: !!args?.bidirectional, result });
+      } catch (error) {
+        return errorResponse(
+          `Error linking Campaign Codex sheets: ${error instanceof Error ? error.message : String(error)}`
+        );
+      }
+    }
+
+    if (name === "get_events") {
+      try {
+        const { lastSeq, events } = foundryClient.getEvents(
+          (args?.since_seq as number | undefined) ?? 0,
+          { event: args?.event as string | undefined, limit: args?.limit as number | undefined }
+        );
+        return successResponse({ lastSeq, count: events.length, events });
+      } catch (error) {
+        return errorResponse(
+          `Error reading events: ${error instanceof Error ? error.message : String(error)}`
+        );
+      }
+    }
+
+    if (name === "wait_for_message") {
+      try {
+        const where = (args?.where as Record<string, unknown> | undefined) ?? null;
+        const timeoutS = Math.min((args?.timeout_seconds as number | undefined) ?? 60, 120);
+        const sinceSeq = (args?.since_seq as number | undefined) ?? foundryClient.getEventSeq();
+
+        const match = await foundryClient.waitForEvent(
+          (e) => {
+            if (e.event !== "modifyDocument") return undefined;
+            const payload = e.args.find(
+              (a): a is Record<string, unknown> =>
+                typeof a === "object" && a !== null && (a as Record<string, unknown>).type === "ChatMessage"
+            );
+            if (!payload || payload.action !== "create") return undefined;
+            const docs = (payload.result as Record<string, unknown>[] | undefined) ?? [];
+            const hits = filterDocumentsByWhere(docs, where);
+            return hits.length ? hits : undefined;
+          },
+          timeoutS * 1000,
+          sinceSeq
+        );
+
+        if (match === undefined) {
+          return successResponse({ timeout: true, waited_seconds: timeoutS, messages: [] });
+        }
+        return successResponse({ timeout: false, messages: match });
+      } catch (error) {
+        return errorResponse(
+          `Error waiting for message: ${error instanceof Error ? error.message : String(error)}`
         );
       }
     }

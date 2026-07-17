@@ -351,7 +351,103 @@ export class FoundryClient {
         this.logger.error("[FoundryClient] Received session event, connection ready");
         return;
       }
+
+      // Broadcasts serveur (« 42[... » sans ackId) : chat des joueurs, écritures
+      // d'autres clients, combat… — capturés dans le buffer d'événements.
+      if (message.startsWith("42[")) {
+        try {
+          const parsed = JSON.parse(message.slice(2)) as unknown[];
+          if (Array.isArray(parsed) && typeof parsed[0] === "string") {
+            this.recordEvent(parsed[0], parsed.slice(1));
+          }
+        } catch {
+          // trame non-JSON : ignorée
+        }
+      }
     });
+  }
+
+  // --- Buffer d'événements (broadcasts socket) ---------------------------------
+  private eventSeq = 0;
+  private eventBuffer: Array<{ seq: number; t: number; event: string; args: unknown[] }> = [];
+  private eventWaiters: Array<{
+    predicate: (e: { seq: number; t: number; event: string; args: unknown[] }) => unknown;
+    resolve: (value: unknown) => void;
+  }> = [];
+  private static readonly EVENT_BUFFER_MAX = 300;
+  private static readonly EVENT_ARGS_MAX_CHARS = 60_000;
+  private static readonly IGNORED_EVENTS = new Set(["userActivity", "getUserActivity", "time"]);
+
+  private recordEvent(event: string, args: unknown[]): void {
+    if (FoundryClient.IGNORED_EVENTS.has(event)) return;
+    let stored = args;
+    const json = JSON.stringify(args);
+    if (json && json.length > FoundryClient.EVENT_ARGS_MAX_CHARS) {
+      stored = [{ truncated: true, bytes: json.length }];
+    }
+    const entry = { seq: ++this.eventSeq, t: this.now(), event, args: stored };
+    this.eventBuffer.push(entry);
+    if (this.eventBuffer.length > FoundryClient.EVENT_BUFFER_MAX) {
+      this.eventBuffer.shift();
+    }
+    // Réveiller les waiters dont le prédicat matche (le prédicat peut renvoyer
+    // une valeur extraite ; undefined/false = pas de match).
+    this.eventWaiters = this.eventWaiters.filter((w) => {
+      const match = w.predicate(entry);
+      if (match !== undefined && match !== false) {
+        w.resolve(match);
+        return false;
+      }
+      return true;
+    });
+  }
+
+  /** Events received after `sinceSeq` (0 = everything buffered), oldest first. */
+  getEvents(sinceSeq = 0, options?: { event?: string; limit?: number }): {
+    lastSeq: number;
+    events: Array<{ seq: number; t: number; event: string; args: unknown[] }>;
+  } {
+    let events = this.eventBuffer.filter((e) => e.seq > sinceSeq);
+    if (options?.event) {
+      events = events.filter((e) => e.event === options.event);
+    }
+    if (options?.limit && events.length > options.limit) {
+      events = events.slice(-options.limit);
+    }
+    return { lastSeq: this.eventSeq, events };
+  }
+
+  /**
+   * Resolve as soon as an event matching `predicate` arrives (scanning the
+   * buffer from `sinceSeq` first, then live events), or with `undefined` on
+   * timeout. The predicate may return an extracted value.
+   */
+  waitForEvent(
+    predicate: (e: { seq: number; t: number; event: string; args: unknown[] }) => unknown,
+    timeoutMs: number,
+    sinceSeq = 0
+  ): Promise<unknown> {
+    for (const entry of this.eventBuffer) {
+      if (entry.seq > sinceSeq) {
+        const match = predicate(entry);
+        if (match !== undefined && match !== false) {
+          return Promise.resolve(match);
+        }
+      }
+    }
+    return new Promise((resolve) => {
+      const waiter = { predicate, resolve: resolve as (v: unknown) => void };
+      this.eventWaiters.push(waiter);
+      this.setTimeoutFn(() => {
+        this.eventWaiters = this.eventWaiters.filter((w) => w !== waiter);
+        resolve(undefined);
+      }, timeoutMs);
+    });
+  }
+
+  /** Current event sequence number (to pass as since_seq before triggering an action). */
+  getEventSeq(): number {
+    return this.eventSeq;
   }
 
   /**
@@ -999,6 +1095,7 @@ export class FoundryClient {
       query?: Record<string, unknown> | null;
       requestedFields?: string[] | null;
       maxLength?: number | null;
+      index?: boolean;
     }
   ): Promise<Record<string, unknown>[]> {
     const response = await this.sendModifyDocumentRequest(
@@ -1009,7 +1106,7 @@ export class FoundryClient {
         pack,
         action: "get",
         broadcast: false,
-        index: false,
+        index: options?.index === true,
       },
       `Timeout waiting for getPackDocuments response (30s) for ${pack}`,
       (responseData) => responseData.action === "get",

@@ -1269,6 +1269,199 @@ describe("server tools", () => {
       expect((response as any).isError).toBeUndefined();
     });
 
+    test("control_playlist stop mirrors Playlist#stopAll", async () => {
+      const client = {
+        isConnected: () => true,
+        getDocument: jest.fn().mockResolvedValue({
+          _id: "pl1", name: "Ambiance", mode: 0,
+          sounds: [{ _id: "s1", name: "Thème", sort: 0 }, { _id: "s2", name: "Combat", sort: 1 }],
+        }),
+        modifyDocument: jest.fn().mockResolvedValue({ ok: true }),
+      } as any;
+      const handler = createToolHandler(client);
+      await handler({ params: { name: "control_playlist", arguments: { playlist: "Ambiance", action: "stop" } } });
+      expect(client.modifyDocument).toHaveBeenCalledWith("Playlist", "pl1", [
+        { playing: false, sounds: [{ _id: "s1", playing: false }, { _id: "s2", playing: false }] },
+      ]);
+    });
+
+    test("control_playlist play (sequential) starts the first sound", async () => {
+      const client = {
+        isConnected: () => true,
+        getDocument: jest.fn().mockResolvedValue({
+          _id: "pl1", name: "Ambiance", mode: 0,
+          sounds: [{ _id: "s2", name: "Combat", sort: 1 }, { _id: "s1", name: "Thème", sort: 0 }],
+        }),
+        modifyDocument: jest.fn().mockResolvedValue({ ok: true }),
+      } as any;
+      const handler = createToolHandler(client);
+      const response = await handler({ params: { name: "control_playlist", arguments: { playlist: "pl1", action: "play" } } });
+      expect(client.modifyDocument).toHaveBeenCalledWith("Playlist", "pl1", [
+        { playing: true, sounds: [{ _id: "s1", playing: true }, { _id: "s2", playing: false }] },
+      ]);
+      const body = JSON.parse((response as any).content[0].text);
+      expect(body.playing).toEqual(["Thème"]);
+    });
+
+    test("manage_combat create builds combat + combatants from scene tokens", async () => {
+      const client = {
+        isConnected: () => true,
+        getDocuments: jest.fn().mockResolvedValue([{
+          _id: "sc1", name: "Toydaria", active: true,
+          tokens: [
+            { _id: "t1", name: "Uchebe", actorId: "a1", hidden: false },
+            { _id: "t2", name: "Décor", actorId: null },
+          ],
+        }]),
+        createDocument: jest.fn()
+          .mockResolvedValueOnce({ result: [{ _id: "cb1" }] })
+          .mockResolvedValueOnce({ result: [{ _id: "cbt1" }] }),
+      } as any;
+      const handler = createToolHandler(client);
+      const response = await handler({ params: { name: "manage_combat", arguments: { action: "create" } } });
+      expect(client.createDocument).toHaveBeenNthCalledWith(1, "Combat", [{ scene: "sc1", active: true }]);
+      expect(client.createDocument).toHaveBeenNthCalledWith(2, "Combatant",
+        [{ tokenId: "t1", sceneId: "sc1", actorId: "a1", hidden: false }],
+        { parentUuid: "Combat.cb1" });
+      const body = JSON.parse((response as any).content[0].text);
+      expect(body.combat).toBe("cb1");
+      expect(body.combatants).toEqual(["Uchebe"]);
+    });
+
+    test("manage_combat next_turn wraps to next round", async () => {
+      const client = {
+        isConnected: () => true,
+        getDocuments: jest.fn().mockResolvedValue([{
+          _id: "cb1", active: true, round: 1, turn: 1,
+          combatants: [
+            { _id: "c1", name: "A", initiative: 15 },
+            { _id: "c2", name: "B", initiative: 10 },
+          ],
+        }]),
+        modifyDocument: jest.fn().mockResolvedValue({ ok: true }),
+      } as any;
+      const handler = createToolHandler(client);
+      const response = await handler({ params: { name: "manage_combat", arguments: { action: "next_turn" } } });
+      expect(client.modifyDocument).toHaveBeenCalledWith("Combat", "cb1", [{ round: 2, turn: 0 }]);
+      const body = JSON.parse((response as any).content[0].text);
+      expect(body.current).toBe("A");
+    });
+
+    test("place_token merges the prototype token", async () => {
+      const client = {
+        isConnected: () => true,
+        getDocument: jest.fn().mockResolvedValue({
+          _id: "a1", name: "Uchebe",
+          prototypeToken: { name: "Uchebe", width: 1, height: 1, actorLink: true, disposition: 1 },
+        }),
+        getDocuments: jest.fn().mockResolvedValue([{ _id: "sc1", name: "Toydaria", active: true }]),
+        createDocument: jest.fn().mockResolvedValue({ result: [{ _id: "t9" }] }),
+      } as any;
+      const handler = createToolHandler(client);
+      await handler({ params: { name: "place_token", arguments: { actor: "Uchebe", x: 300, y: 400 } } });
+      expect(client.createDocument).toHaveBeenCalledWith("Token", [
+        expect.objectContaining({ name: "Uchebe", actorId: "a1", x: 300, y: 400, actorLink: true }),
+      ], { parentUuid: "Scene.sc1" });
+    });
+
+    test("roll_ffg_pool posts a chat message with the result", async () => {
+      const client = {
+        isConnected: () => true,
+        getUserId: () => "bot1",
+        createDocument: jest.fn().mockResolvedValue({ ok: true }),
+      } as any;
+      const handler = createToolHandler(client);
+      const response = await handler({
+        params: { name: "roll_ffg_pool", arguments: { description: "Perception", ability: 2, difficulty: 1 } },
+      });
+      expect(client.createDocument).toHaveBeenCalledWith("ChatMessage", [
+        expect.objectContaining({ author: "bot1", content: expect.stringContaining("Perception") }),
+      ]);
+      const body = JSON.parse((response as any).content[0].text);
+      expect(body.detail).toHaveProperty("netSuccesses");
+      expect(body.posted).toBe(true);
+    });
+
+    test("cc_create_sheet builds the npc flag structure", async () => {
+      const client = {
+        isConnected: () => true,
+        getDocument: jest.fn().mockResolvedValue({ _id: "a1", name: "Jerserra" }),
+        createDocument: jest.fn().mockResolvedValue({ result: [{ _id: "j9" }] }),
+      } as any;
+      const handler = createToolHandler(client);
+      const response = await handler({
+        params: {
+          name: "cc_create_sheet",
+          arguments: { name: "Jerserra (fiche)", type: "npc", description: "<p>Antagoniste</p>", linked_actor: "Jerserra" },
+        },
+      });
+      expect(client.createDocument).toHaveBeenCalledWith("JournalEntry", [
+        expect.objectContaining({
+          name: "Jerserra (fiche)",
+          flags: {
+            "campaign-codex": expect.objectContaining({
+              type: "npc",
+              data: expect.objectContaining({
+                description: "<p>Antagoniste</p>",
+                linkedActor: "Actor.a1",
+                tagMode: false,
+              }),
+            }),
+          },
+          ownership: { default: 2 },
+        }),
+      ]);
+      const body = JSON.parse((response as any).content[0].text);
+      expect(body.created._id).toBe("j9");
+    });
+
+    test("cc_link appends to associates without duplicating", async () => {
+      const sheets: Record<string, any> = {
+        A: { _id: "jA", name: "A", flags: { "campaign-codex": { type: "npc", data: { associates: ["JournalEntry.jX"] } } } },
+        B: { _id: "jB", name: "B", flags: { "campaign-codex": { type: "group", data: { associates: [] } } } },
+      };
+      const client = {
+        isConnected: () => true,
+        getDocument: jest.fn().mockImplementation((_c: string, ident: any) => sheets[ident._id] ?? sheets[ident.name] ?? null),
+        modifyDocument: jest.fn().mockResolvedValue({ ok: true }),
+      } as any;
+      const handler = createToolHandler(client);
+      await handler({ params: { name: "cc_link", arguments: { from: "A", to: "B" } } });
+      expect(client.modifyDocument).toHaveBeenCalledWith("JournalEntry", "jA", [
+        { flags: { "campaign-codex": { data: { associates: ["JournalEntry.jX", "JournalEntry.jB"] } } } },
+      ]);
+    });
+
+    test("wait_for_message matches created chat messages", async () => {
+      const client = {
+        isConnected: () => true,
+        getEventSeq: () => 5,
+        waitForEvent: jest.fn().mockImplementation(async (predicate: any) =>
+          predicate({
+            seq: 6, t: 0, event: "modifyDocument",
+            args: [{ type: "ChatMessage", action: "create", result: [{ _id: "m1", content: "jet !" }] }],
+          })
+        ),
+      } as any;
+      const handler = createToolHandler(client);
+      const response = await handler({ params: { name: "wait_for_message", arguments: {} } });
+      const body = JSON.parse((response as any).content[0].text);
+      expect(body.timeout).toBe(false);
+      expect(body.messages[0]._id).toBe("m1");
+    });
+
+    test("wait_for_message reports timeout", async () => {
+      const client = {
+        isConnected: () => true,
+        getEventSeq: () => 5,
+        waitForEvent: jest.fn().mockResolvedValue(undefined),
+      } as any;
+      const handler = createToolHandler(client);
+      const response = await handler({ params: { name: "wait_for_message", arguments: { timeout_seconds: 1 } } });
+      const body = JSON.parse((response as any).content[0].text);
+      expect(body.timeout).toBe(true);
+    });
+
     test("request_player_roll supports whisper", async () => {
       const client = {
         isConnected: () => true,

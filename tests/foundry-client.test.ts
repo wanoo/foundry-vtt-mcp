@@ -626,6 +626,53 @@ describe("FoundryClient", () => {
       expect(docs).toEqual([{ _id: "j1", name: "Halyard" }]);
     });
 
+    test("event buffer records broadcasts and wakes waiters", async () => {
+      const { client } = createClient({ WebSocketCtor: TestWebSocket });
+      const ws = new TestWebSocket("ws://host");
+      (client as any).connection = {
+        hostname: "host", credential: { _id: "c", hostname: "host", password: "p", userid: "u" },
+        sessionId: "sid", ws, generation: 13,
+      };
+      jest.spyOn(client as any, "reconnect").mockResolvedValue(undefined);
+      (client as any).setupWebSocketHandlers(ws);
+
+      // broadcast d'un autre client : création de ChatMessage
+      ws.emit("message", Buffer.from('42["modifyDocument",{"type":"ChatMessage","action":"create","result":[{"_id":"m1","content":"coucou"}]}]'));
+      // événement ignoré
+      ws.emit("message", Buffer.from('42["userActivity","u1",{}]'));
+      // trame avec ackId (la nôtre) : PAS un broadcast
+      ws.emit("message", Buffer.from('4212["modifyDocument",{}]'));
+
+      const { lastSeq, events } = client.getEvents();
+      expect(lastSeq).toBe(1);
+      expect(events).toHaveLength(1);
+      expect(events[0].event).toBe("modifyDocument");
+
+      // waiter sur événement futur
+      const waiting = client.waitForEvent(
+        (e) => (e.event === "pause" ? e.args[0] : undefined),
+        5000,
+        lastSeq
+      );
+      ws.emit("message", Buffer.from('42["pause",true,{"userId":"gm"}]'));
+      await expect(waiting).resolves.toBe(true);
+
+      // scan du buffer via sinceSeq (événement déjà passé)
+      const past = await client.waitForEvent(
+        (e) => (e.event === "modifyDocument" ? "found" : undefined),
+        10,
+        0
+      );
+      expect(past).toBe("found");
+    });
+
+    test("event buffer truncates oversized args", () => {
+      const { client } = createClient();
+      (client as any).recordEvent("modifyDocument", [{ big: "x".repeat(70_000) }]);
+      const { events } = client.getEvents();
+      expect(events[0].args[0]).toMatchObject({ truncated: true });
+    });
+
     test("getSettings delegates to getDocuments('settings')", async () => {
       const { client } = createClient();
       const getDocs = jest.spyOn(client, "getDocuments").mockResolvedValue([{ _id: "s1", key: "core.x" } as any]);
