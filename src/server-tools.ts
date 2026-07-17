@@ -1874,6 +1874,19 @@ export function createToolHandler(foundryClient: FoundryClient) {
             .slice()
             .sort((a, b) => ((b.initiative as number) ?? -Infinity) - ((a.initiative as number) ?? -Infinity));
 
+        // Les Combatants ne stockent pas de nom : il vient de leur token.
+        const withNames = async (combat: Record<string, unknown>, order: Record<string, unknown>[]) => {
+          if (!order.length || order.every((c) => c.name)) return order;
+          const sceneId = (combat.scene as string) ?? (order[0].sceneId as string);
+          if (!sceneId) return order;
+          const scene = await foundryClient.getDocument("scenes", { _id: sceneId }, { requestedFields: ["_id", "tokens"] });
+          const tokens = ((scene?.tokens as Record<string, unknown>[] | undefined) ?? []);
+          return order.map((c) => ({
+            ...c,
+            name: c.name ?? tokens.find((t) => t._id === c.tokenId)?.name ?? null,
+          }));
+        };
+
         const resolveCombat = async (): Promise<Record<string, unknown> | null> => {
           const combatId = args?.combat_id as string | undefined;
           if (combatId) return foundryClient.getDocument("combats", { _id: combatId }, {});
@@ -1951,7 +1964,7 @@ export function createToolHandler(foundryClient: FoundryClient) {
         }
 
         if (action === "next_turn" || action === "next_round") {
-          const order = sortedCombatants(combat);
+          const order = await withNames(combat, sortedCombatants(combat));
           const round = (combat.round as number) ?? 0;
           const turn = (combat.turn as number) ?? 0;
           let update: Record<string, unknown>;
@@ -1972,7 +1985,7 @@ export function createToolHandler(foundryClient: FoundryClient) {
         }
 
         if (action === "status") {
-          const order = sortedCombatants(combat);
+          const order = await withNames(combat, sortedCombatants(combat));
           return successResponse({
             combat: combatId,
             active: combat.active,
