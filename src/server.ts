@@ -9,10 +9,15 @@ import {
   ListToolsRequestSchema,
   ListResourcesRequestSchema,
   ReadResourceRequestSchema,
+  ListPromptsRequestSchema,
+  GetPromptRequestSchema,
+  SubscribeRequestSchema,
+  UnsubscribeRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { FoundryClient } from "./foundry-client.js";
 import { createToolDefinitions, createToolHandler, withAnnotations } from "./server-tools.js";
 import { createResourceHandlers } from "./server-resources.js";
+import { createPromptHandlers, PROMPT_DEFINITIONS } from "./server-prompts.js";
 import { loadSystemModules } from "./systems/index.js";
 
 // Get the directory of this file to locate INSTRUCTIONS.md
@@ -48,7 +53,8 @@ const server = new Server(
   {
     capabilities: {
       tools: {},
-      resources: {},
+      resources: { subscribe: true },
+      prompts: {},
       logging: {},
     },
   }
@@ -92,8 +98,30 @@ server.setRequestHandler(ReadResourceRequestSchema, async (req) => {
   return resources.read(req.params.uri);
 });
 
+// Prompts MCP : gabarits MJ injectant l'état live du monde.
+const prompts = createPromptHandlers(foundryClient);
+server.setRequestHandler(ListPromptsRequestSchema, async () => ({ prompts: PROMPT_DEFINITIONS }));
+server.setRequestHandler(GetPromptRequestSchema, async (req) =>
+  prompts.get(req.params.name, req.params.arguments)
+);
+
+// Souscriptions de ressources : notifications/resources/updated quand un
+// document suivi est modifié par un AUTRE client (broadcasts socket).
+const subscribedUris = new Set<string>();
+server.setRequestHandler(SubscribeRequestSchema, async (req) => {
+  subscribedUris.add(req.params.uri);
+  return {};
+});
+server.setRequestHandler(UnsubscribeRequestSchema, async (req) => {
+  subscribedUris.delete(req.params.uri);
+  return {};
+});
+
+const TYPE_TO_RESOURCE: Record<string, string> = { JournalEntry: "journal", Actor: "actors" };
+
 // Notifications : chaque broadcast Foundry bufferisé part en notification de
-// logging MCP (payload allégé — le détail se lit via get_events).
+// logging MCP (payload allégé — le détail se lit via get_events), et les
+// documents souscrits déclenchent notifications/resources/updated.
 foundryClient.onEvent = (e) => {
   const first = e.args[0] as Record<string, unknown> | undefined;
   void server
@@ -111,6 +139,21 @@ foundryClient.onEvent = (e) => {
     .catch(() => {
       // transport pas encore prêt ou fermé : sans gravité
     });
+
+  if (e.event === "modifyDocument" && first && subscribedUris.size) {
+    const section = TYPE_TO_RESOURCE[first.type as string];
+    if (section) {
+      const docs = (first.result as Array<Record<string, unknown> | string> | undefined) ?? [];
+      for (const doc of docs) {
+        const _id = typeof doc === "string" ? doc : (doc._id as string | undefined);
+        if (!_id) continue;
+        const uri = `foundry://${section}/${_id}`;
+        if (subscribedUris.has(uri)) {
+          void server.sendResourceUpdated({ uri }).catch(() => {});
+        }
+      }
+    }
+  }
 };
 
 // Start the server

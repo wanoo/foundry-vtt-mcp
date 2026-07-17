@@ -1135,6 +1135,42 @@ describe("server tools", () => {
     });
   });
 
+  describe("ping et export_journals", () => {
+    test("ping renvoie l'état du client", async () => {
+      const client = {
+        isConnected: () => true,
+        getStatus: jest.fn().mockResolvedValue({ connected: true, generation: 13, server: { version: "13.351" } }),
+      } as any;
+      const handler = createToolHandler(client);
+      const response = await handler({ params: { name: "ping", arguments: {} } });
+      const body = JSON.parse((response as any).content[0].text);
+      expect(body.connected).toBe(true);
+      expect(body.server.version).toBe("13.351");
+    });
+
+    test("export_journals convertit en Markdown avec pagination", async () => {
+      const journals = Array.from({ length: 5 }, (_, i) => ({
+        _id: `j${i}`,
+        name: `Journal ${i}`,
+        pages: [{ name: "P", text: { content: `<h2>Titre ${i}</h2><p>Du <strong>texte</strong></p>` } }],
+      }));
+      const client = {
+        isConnected: () => true,
+        getDocuments: jest.fn().mockResolvedValue(journals),
+      } as any;
+      const handler = createToolHandler(client);
+      const response = await handler({
+        params: { name: "export_journals", arguments: { offset: 1, limit: 2 } },
+      });
+      const body = JSON.parse((response as any).content[0].text);
+      expect(body.total).toBe(5);
+      expect(body.count).toBe(2);
+      expect(body.journals[0]._id).toBe("j1");
+      expect(body.journals[0].pages[0].markdown).toContain("## Titre 1");
+      expect(body.journals[0].pages[0].markdown).toContain("**texte**");
+    });
+  });
+
   describe("draw_from_table", () => {
     const critTable = {
       _id: "tb1",

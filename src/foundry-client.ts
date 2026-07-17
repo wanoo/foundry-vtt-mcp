@@ -462,6 +462,44 @@ export class FoundryClient {
   }
 
   /**
+   * Lightweight health check: public `GET /api/status` (no auth, no world dump)
+   * + local connection state. The cheap alternative to get_world as a ping.
+   */
+  async getStatus(): Promise<Record<string, unknown>> {
+    const hostname = this.connection?.hostname ?? this.credentials[this.activeCredentialIndex]?.hostname;
+    let serverStatus: Record<string, unknown> | null = null;
+    if (hostname) {
+      const { host, base } = this.splitHost(hostname);
+      serverStatus = await new Promise((resolve) => {
+        const req = this.https.request(
+          { hostname: host, port: 443, path: base + "/api/status", method: "GET" },
+          (res) => {
+            let data = "";
+            res.on("data", (chunk) => { data += chunk; });
+            res.on("end", () => {
+              try {
+                resolve(JSON.parse(data) as Record<string, unknown>);
+              } catch {
+                resolve(null);
+              }
+            });
+          }
+        );
+        req.on("error", () => resolve(null));
+        req.end();
+      });
+    }
+    return {
+      connected: this.isConnected(),
+      hostname: hostname ?? null,
+      userId: this.getUserId(),
+      generation: this.connection?.generation ?? null,
+      eventSeq: this.eventSeq,
+      server: serverStatus,
+    };
+  }
+
+  /**
    * Wait for Foundry to bind the game session to this socket.
    *
    * Foundry emits `42["session", { sessionId, userId }]` once the socket is

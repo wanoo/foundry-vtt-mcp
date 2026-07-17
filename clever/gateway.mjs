@@ -23,6 +23,10 @@ import {
   CallToolRequestSchema,
   ListResourcesRequestSchema,
   ReadResourceRequestSchema,
+  ListPromptsRequestSchema,
+  GetPromptRequestSchema,
+  SubscribeRequestSchema,
+  UnsubscribeRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -91,7 +95,7 @@ function requireBackend() {
 function makeSession() {
   const server = new Server(
     { name: 'foundry-mcp-clever', version: '1.0.0' },
-    { capabilities: { tools: {}, resources: {}, logging: {} } }
+    { capabilities: { tools: {}, resources: { subscribe: true }, prompts: {}, logging: {} } }
   );
   // Passe-plat : outils ET ressources sont relayés au serveur stdio.
   // requireBackend() relit `client` à chaque appel : les sessions survivent au respawn.
@@ -105,6 +109,20 @@ function makeSession() {
   server.setRequestHandler(ReadResourceRequestSchema, async (req) =>
     requireBackend().readResource({ uri: req.params.uri })
   );
+  server.setRequestHandler(ListPromptsRequestSchema, async () => requireBackend().listPrompts());
+  server.setRequestHandler(GetPromptRequestSchema, async (req) =>
+    requireBackend().getPrompt({ name: req.params.name, arguments: req.params.arguments || {} })
+  );
+  // NB : les souscriptions vivent dans le child (jeu unique partagé) — les
+  // notifications resources/updated sont répliquées vers TOUTES les sessions.
+  server.setRequestHandler(SubscribeRequestSchema, async (req) => {
+    await requireBackend().subscribeResource({ uri: req.params.uri });
+    return {};
+  });
+  server.setRequestHandler(UnsubscribeRequestSchema, async (req) => {
+    await requireBackend().unsubscribeResource({ uri: req.params.uri });
+    return {};
+  });
   return server;
 }
 

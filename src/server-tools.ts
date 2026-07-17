@@ -1,6 +1,7 @@
 import type { FoundryClient } from "./foundry-client.js";
 import { canUseIndex } from "./core/collections.js";
 import { filterDocumentsByWhere } from "./core/document-utils.js";
+import { htmlToMarkdown } from "./core/markdown.js";
 
 export interface DocumentTypeConfig {
   singular: string;
@@ -846,6 +847,31 @@ const ccLinkTool = {
   },
 };
 
+const pingTool = {
+  name: "ping",
+  description:
+    "Lightweight health check: Foundry server status (public /api/status — version, world, uptime, user count) + this client's connection state. Cheap alternative to get_world (no world dump).",
+  inputSchema: { type: "object", properties: {} },
+};
+
+const exportJournalsTool = {
+  name: "export_journals",
+  description:
+    "Export journals as Markdown (HTML converted, @UUID links flattened). Filter with where (same syntax as get_journals); paginate with offset/limit (default limit 20 — thousands of journals otherwise).",
+  inputSchema: {
+    type: "object",
+    properties: {
+      where: {
+        type: "object",
+        additionalProperties: true,
+        description: `Same filter syntax as get_journals, e.g. {"folder": "abc"} or {"flags.campaign-codex.type": "npc"}`,
+      },
+      offset: { type: "number", description: "Skip this many journals (default 0)" },
+      limit: { type: "number", description: "Max journals to export (default 20)" },
+    },
+  },
+};
+
 const getEventsTool = {
   name: "get_events",
   description:
@@ -922,6 +948,8 @@ export function createToolDefinitions() {
     ccLinkTool,
     getEventsTool,
     waitForMessageTool,
+    pingTool,
+    exportJournalsTool,
   ].map(withAnnotations);
 }
 
@@ -932,6 +960,7 @@ export function createToolDefinitions() {
 const READ_ONLY_EXTRA = new Set([
   "search_journals", "browse_files", "show_credentials",
   "cc_list_sheets", "cc_get_sheet", "wait_for_message",
+  "ping", "export_journals",
 ]);
 const DESTRUCTIVE_TOOLS = new Set(["delete_document", "delete_compendium"]);
 
@@ -2223,6 +2252,39 @@ export function createToolHandler(foundryClient: FoundryClient) {
       } catch (error) {
         return errorResponse(
           `Error drawing from table: ${error instanceof Error ? error.message : String(error)}`
+        );
+      }
+    }
+
+    if (name === "ping") {
+      try {
+        return successResponse(await foundryClient.getStatus());
+      } catch (error) {
+        return errorResponse(
+          `Error pinging: ${error instanceof Error ? error.message : String(error)}`
+        );
+      }
+    }
+
+    if (name === "export_journals") {
+      try {
+        const where = (args?.where as Record<string, unknown> | undefined) ?? null;
+        const offset = (args?.offset as number | undefined) ?? 0;
+        const limit = (args?.limit as number | undefined) ?? 20;
+        const journals = (await foundryClient.getDocuments("journal", { where })) as Record<string, unknown>[];
+        const page = journals.slice(offset, offset + limit);
+        const exported = page.map((j) => ({
+          _id: j._id,
+          name: j.name,
+          pages: ((j.pages as Record<string, unknown>[] | undefined) ?? []).map((p) => ({
+            name: p.name,
+            markdown: htmlToMarkdown(((p.text as Record<string, unknown> | undefined)?.content as string) ?? ""),
+          })),
+        }));
+        return successResponse({ total: journals.length, offset, count: exported.length, journals: exported });
+      } catch (error) {
+        return errorResponse(
+          `Error exporting journals: ${error instanceof Error ? error.message : String(error)}`
         );
       }
     }
