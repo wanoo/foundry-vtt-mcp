@@ -585,6 +585,134 @@ const setSettingTool = {
   },
 };
 
+const listTokensTool = {
+  name: "list_tokens",
+  description:
+    "List the tokens placed on a scene (position, actor, visibility). Defaults to the currently active scene.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      scene_id: { type: "string", description: "Scene _id (default: the active scene)" },
+      scene_name: { type: "string", description: "Scene name (alternative to scene_id)" },
+    },
+  },
+};
+
+const moveTokenTool = {
+  name: "move_token",
+  description:
+    "Move a token on a scene to new pixel coordinates (top-left origin; one grid square is usually 100px). Players see the token move.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      token: { type: "string", description: "Token _id or name" },
+      x: { type: "number", description: "New x position in pixels" },
+      y: { type: "number", description: "New y position in pixels" },
+      elevation: { type: "number", description: "Optional new elevation" },
+      scene_id: { type: "string", description: "Scene _id (default: the active scene)" },
+      scene_name: { type: "string", description: "Scene name (alternative to scene_id)" },
+    },
+    required: ["token"],
+  },
+};
+
+const updateTokenTool = {
+  name: "update_token",
+  description:
+    "Update arbitrary fields of a token on a scene (hidden, disposition, name, texture, light...). For position use move_token.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      token: { type: "string", description: "Token _id or name" },
+      updates: {
+        type: "object",
+        additionalProperties: true,
+        description: `Fields to update, e.g. {"hidden": true} or {"disposition": -1}`,
+      },
+      scene_id: { type: "string", description: "Scene _id (default: the active scene)" },
+      scene_name: { type: "string", description: "Scene name (alternative to scene_id)" },
+    },
+    required: ["token", "updates"],
+  },
+};
+
+// Core Foundry v13 status effects (CONFIG.statusEffects) — id → {name, img}.
+// Stable core data; systems may add their own but these always exist.
+const CORE_STATUS_EFFECTS: Record<string, { name: string; img: string }> = {
+  dead: { name: "Dead", img: "icons/svg/skull.svg" },
+  unconscious: { name: "Unconscious", img: "icons/svg/unconscious.svg" },
+  sleep: { name: "Asleep", img: "icons/svg/sleep.svg" },
+  stun: { name: "Stunned", img: "icons/svg/daze.svg" },
+  prone: { name: "Prone", img: "icons/svg/falling.svg" },
+  restrain: { name: "Restrained", img: "icons/svg/net.svg" },
+  paralysis: { name: "Paralyzed", img: "icons/svg/paralysis.svg" },
+  fly: { name: "Flying", img: "icons/svg/wing.svg" },
+  blind: { name: "Blind", img: "icons/svg/blind.svg" },
+  deaf: { name: "Deaf", img: "icons/svg/deaf.svg" },
+  silence: { name: "Silenced", img: "icons/svg/silenced.svg" },
+  fear: { name: "Frightened", img: "icons/svg/terror.svg" },
+  burning: { name: "Burning", img: "icons/svg/fire.svg" },
+  frozen: { name: "Frozen", img: "icons/svg/frozen.svg" },
+  shock: { name: "Shocked", img: "icons/svg/lightning.svg" },
+  corrode: { name: "Corroding", img: "icons/svg/acid.svg" },
+  bleeding: { name: "Bleeding", img: "icons/svg/blood.svg" },
+  disease: { name: "Diseased", img: "icons/svg/biohazard.svg" },
+  poison: { name: "Poisoned", img: "icons/svg/poison.svg" },
+  curse: { name: "Cursed", img: "icons/svg/sun.svg" },
+  regen: { name: "Regenerating", img: "icons/svg/regen.svg" },
+  degen: { name: "Degenerating", img: "icons/svg/degen.svg" },
+  invisible: { name: "Invisible", img: "icons/svg/invisible.svg" },
+  target: { name: "Targeted", img: "icons/svg/target.svg" },
+  eye: { name: "Marked", img: "icons/svg/eye.svg" },
+  bless: { name: "Blessed", img: "icons/svg/angel.svg" },
+};
+
+const toggleActorConditionTool = {
+  name: "toggle_actor_condition",
+  description:
+    `Add or remove a status condition (ActiveEffect) on an actor — shown on its linked tokens. Conditions: ${Object.keys(CORE_STATUS_EFFECTS).join(", ")}. Only works on world actors (linked tokens); unlinked-token deltas are not supported.`,
+  inputSchema: {
+    type: "object",
+    properties: {
+      _id: { type: "string", description: "Actor _id" },
+      name: { type: "string", description: "Actor name (alternative to _id)" },
+      condition: { type: "string", description: `Status id (e.g. "prone", "stun", "bleeding")` },
+      active: { type: "boolean", description: "true to add the condition, false to remove it" },
+    },
+    required: ["condition", "active"],
+  },
+};
+
+const requestPlayerRollTool = {
+  name: "request_player_roll",
+  description:
+    "Post a Star Wars FFG roll request in chat: a message with a '🎲' button that opens the FFG dice-pool dialog pre-filled for the player who clicks it (system flag ffg-pool-to-player). starwarsffg only.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      description: { type: "string", description: `Short label of the check (e.g. "Test de Peur", "Perception moyenne")` },
+      content: {
+        type: "string",
+        description: "Optional HTML shown above the button (context, stakes, spending guide). The button is appended automatically.",
+      },
+      difficulty: { type: "number", description: "Difficulty dice [di] (default 0)" },
+      challenge: { type: "number", description: "Challenge dice [ch] (default 0)" },
+      ability: { type: "number", description: "Ability dice [ab] added to the player's pool (default 0)" },
+      proficiency: { type: "number", description: "Proficiency dice [pr] (default 0)" },
+      boost: { type: "number", description: "Boost dice [bo] (default 0)" },
+      setback: { type: "number", description: "Setback dice [se] (default 0)" },
+      force: { type: "number", description: "Force dice [fo] (default 0)" },
+      skill_name: { type: "string", description: "Skill name displayed in the roll dialog (default: the description)" },
+      whisper_users: {
+        type: "array",
+        items: { type: "string" },
+        description: "Optional user _ids to whisper the request to (default: public message)",
+      },
+    },
+    required: ["description"],
+  },
+};
+
 export function createToolDefinitions() {
   return [
     ...DOCUMENT_TYPES.flatMap((config) => [
@@ -615,6 +743,11 @@ export function createToolDefinitions() {
     listActorOwnershipTool,
     setActorOwnershipTool,
     getCurrentSceneTool,
+    listTokensTool,
+    moveTokenTool,
+    updateTokenTool,
+    toggleActorConditionTool,
+    requestPlayerRollTool,
   ];
 }
 
@@ -1280,6 +1413,188 @@ export function createToolHandler(foundryClient: FoundryClient) {
       } catch (error) {
         return errorResponse(
           `Error fetching current scene: ${error instanceof Error ? error.message : String(error)}`
+        );
+      }
+    }
+
+    if (name === "list_tokens" || name === "move_token" || name === "update_token") {
+      try {
+        // Résolution de la scène : _id / nom fournis, sinon la scène active.
+        const sceneId = args?.scene_id as string | undefined;
+        const sceneName = args?.scene_name as string | undefined;
+        let scene: Record<string, unknown> | null;
+        if (sceneId || sceneName) {
+          scene = await foundryClient.getDocument(
+            "scenes",
+            { _id: sceneId, name: sceneName },
+            { requestedFields: ["_id", "name", "tokens"] }
+          );
+        } else {
+          const actives = (await foundryClient.getDocuments("scenes", {
+            where: { active: true },
+            requestedFields: ["_id", "name", "tokens"],
+          })) as Record<string, unknown>[];
+          scene = actives[0] ?? null;
+        }
+        if (!scene) {
+          return errorResponse("Error: Scene not found (no active scene and none specified)");
+        }
+        const tokens = (scene.tokens as Record<string, unknown>[] | undefined) ?? [];
+
+        if (name === "list_tokens") {
+          return successResponse({
+            scene: { _id: scene._id, name: scene.name },
+            tokens: tokens.map((t) => ({
+              _id: t._id,
+              name: t.name,
+              x: t.x,
+              y: t.y,
+              elevation: t.elevation,
+              hidden: t.hidden,
+              actorId: t.actorId,
+              actorLink: t.actorLink,
+              disposition: t.disposition,
+            })),
+          });
+        }
+
+        const tokenArg = args?.token as string | undefined;
+        if (!tokenArg) {
+          return errorResponse("Error: 'token' is required");
+        }
+        const token = tokens.find((t) => t._id === tokenArg || t.name === tokenArg);
+        if (!token) {
+          return errorResponse(`Error: Token not found on scene ${scene.name}: ${tokenArg}`);
+        }
+
+        let updates: Record<string, unknown>;
+        if (name === "move_token") {
+          updates = {};
+          if (args?.x !== undefined) updates.x = args.x;
+          if (args?.y !== undefined) updates.y = args.y;
+          if (args?.elevation !== undefined) updates.elevation = args.elevation;
+          if (!Object.keys(updates).length) {
+            return errorResponse("Error: Provide at least one of: x, y, elevation");
+          }
+        } else {
+          updates = (args?.updates as Record<string, unknown> | undefined) ?? {};
+          if (!Object.keys(updates).length) {
+            return errorResponse("Error: 'updates' must not be empty");
+          }
+        }
+
+        const result = await foundryClient.modifyDocument("Token", token._id as string, [updates], {
+          parentUuid: `Scene.${scene._id}`,
+        });
+        return successResponse({
+          scene: { _id: scene._id, name: scene.name },
+          token: { _id: token._id, name: token.name },
+          applied: updates,
+          result,
+        });
+      } catch (error) {
+        return errorResponse(
+          `Error on token operation: ${error instanceof Error ? error.message : String(error)}`
+        );
+      }
+    }
+
+    if (name === "toggle_actor_condition") {
+      try {
+        const _id = args?._id as string | undefined;
+        const docName = args?.name as string | undefined;
+        const condition = args?.condition as string | undefined;
+        const active = args?.active as boolean | undefined;
+        if (!_id && !docName) {
+          return errorResponse("Error: Must provide one of: _id or name (actor)");
+        }
+        if (!condition || active === undefined) {
+          return errorResponse("Error: 'condition' and 'active' are required");
+        }
+        const status = CORE_STATUS_EFFECTS[condition];
+        if (!status) {
+          return errorResponse(
+            `Error: Unknown condition '${condition}'. Available: ${Object.keys(CORE_STATUS_EFFECTS).join(", ")}`
+          );
+        }
+
+        const actor = await foundryClient.getDocument(
+          "actors",
+          { _id, name: docName },
+          { requestedFields: ["_id", "name", "effects"] }
+        );
+        if (!actor) return errorResponse("Error: Actor not found");
+        const effects = (actor.effects as Record<string, unknown>[] | undefined) ?? [];
+        const existing = effects.filter((e) => Array.isArray(e.statuses) && (e.statuses as string[]).includes(condition));
+
+        if (active) {
+          if (existing.length) {
+            return successResponse({ actor: { _id: actor._id, name: actor.name }, condition, unchanged: "already active" });
+          }
+          const result = await foundryClient.createDocument(
+            "ActiveEffect",
+            [{ name: status.name, img: status.img, statuses: [condition] }],
+            { parentUuid: `Actor.${actor._id}` }
+          );
+          return successResponse({ actor: { _id: actor._id, name: actor.name }, condition, added: true, result });
+        }
+
+        if (!existing.length) {
+          return successResponse({ actor: { _id: actor._id, name: actor.name }, condition, unchanged: "not active" });
+        }
+        const result = await foundryClient.deleteDocument(
+          "ActiveEffect",
+          existing.map((e) => e._id as string),
+          { parentUuid: `Actor.${actor._id}` }
+        );
+        return successResponse({ actor: { _id: actor._id, name: actor.name }, condition, removed: existing.length, result });
+      } catch (error) {
+        return errorResponse(
+          `Error toggling condition: ${error instanceof Error ? error.message : String(error)}`
+        );
+      }
+    }
+
+    if (name === "request_player_roll") {
+      try {
+        const description = args?.description as string | undefined;
+        if (!description) {
+          return errorResponse("Error: 'description' is required");
+        }
+        const pool: Record<string, number> = {};
+        for (const die of ["difficulty", "challenge", "ability", "proficiency", "boost", "setback", "force"]) {
+          const n = args?.[die] as number | undefined;
+          if (n) pool[die] = n;
+        }
+        const body = (args?.content as string | undefined) ?? `<h3>🎲 ${description}</h3>`;
+        const whisper = (args?.whisper_users as string[] | undefined) ?? [];
+
+        // Format vérifié dans le système starwarsffg (bouton .ffg-pool-to-player) :
+        // le clic ouvre le dialogue de jet FFG pré-rempli avec dicePool.
+        const message: Record<string, unknown> = {
+          content: `${body}\n<button class="ffg-pool-to-player">🎲 Lancer — ${description}</button>`,
+          author: foundryClient.getUserId(),
+          flags: {
+            starwarsffg: {
+              dicePool: pool,
+              description,
+              roll: {
+                data: {},
+                skillName: (args?.skill_name as string | undefined) ?? description,
+                item: {},
+                flavor: "",
+                sound: null,
+              },
+            },
+          },
+        };
+        if (whisper.length) message.whisper = whisper;
+
+        const result = await foundryClient.createDocument("ChatMessage", [message]);
+        return successResponse({ posted: description, pool, whisper: whisper.length ? whisper : "public", result });
+      } catch (error) {
+        return errorResponse(
+          `Error posting roll request: ${error instanceof Error ? error.message : String(error)}`
         );
       }
     }

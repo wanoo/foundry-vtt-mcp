@@ -1093,4 +1093,198 @@ describe("server tools", () => {
       expect(body.active).toBeNull();
     });
   });
+
+  describe("lot 2 : tokens, conditions, demandes de jets", () => {
+    const sceneWithTokens = {
+      _id: "sc1",
+      name: "Toydaria",
+      tokens: [
+        { _id: "t1", name: "Uchebe", x: 100, y: 200, hidden: false, actorId: "a1", actorLink: true, disposition: 1 },
+        { _id: "t2", name: "Drengir", x: 300, y: 400, hidden: true, actorId: "a2", actorLink: false, disposition: -1 },
+      ],
+    };
+
+    test("createToolDefinitions includes lot 2 tools", () => {
+      const tools = createToolDefinitions();
+      for (const name of [
+        "list_tokens",
+        "move_token",
+        "update_token",
+        "toggle_actor_condition",
+        "request_player_roll",
+      ]) {
+        expect(tools.find((tool) => tool.name === name)).toBeDefined();
+      }
+    });
+
+    test("list_tokens defaults to the active scene", async () => {
+      const client = {
+        isConnected: () => true,
+        getDocuments: jest.fn().mockResolvedValue([sceneWithTokens]),
+      } as any;
+      const handler = createToolHandler(client);
+      const response = await handler({ params: { name: "list_tokens", arguments: {} } });
+      expect(client.getDocuments).toHaveBeenCalledWith("scenes", expect.objectContaining({
+        where: { active: true },
+      }));
+      const body = JSON.parse((response as any).content[0].text);
+      expect(body.scene.name).toBe("Toydaria");
+      expect(body.tokens).toHaveLength(2);
+      expect(body.tokens[0]).toMatchObject({ _id: "t1", name: "Uchebe", x: 100 });
+    });
+
+    test("move_token resolves token by name and updates embedded doc", async () => {
+      const client = {
+        isConnected: () => true,
+        getDocuments: jest.fn().mockResolvedValue([sceneWithTokens]),
+        modifyDocument: jest.fn().mockResolvedValue({ ok: true }),
+      } as any;
+      const handler = createToolHandler(client);
+      const response = await handler({
+        params: { name: "move_token", arguments: { token: "Uchebe", x: 500, y: 600 } },
+      });
+      expect(client.modifyDocument).toHaveBeenCalledWith("Token", "t1", [{ x: 500, y: 600 }], {
+        parentUuid: "Scene.sc1",
+      });
+      expect((response as any).isError).toBeUndefined();
+    });
+
+    test("move_token errors on unknown token", async () => {
+      const client = {
+        isConnected: () => true,
+        getDocuments: jest.fn().mockResolvedValue([sceneWithTokens]),
+      } as any;
+      const handler = createToolHandler(client);
+      const response = await handler({
+        params: { name: "move_token", arguments: { token: "Nope", x: 1 } },
+      });
+      expect((response as any).isError).toBe(true);
+    });
+
+    test("update_token applies arbitrary fields", async () => {
+      const client = {
+        isConnected: () => true,
+        getDocuments: jest.fn().mockResolvedValue([sceneWithTokens]),
+        modifyDocument: jest.fn().mockResolvedValue({ ok: true }),
+      } as any;
+      const handler = createToolHandler(client);
+      await handler({
+        params: { name: "update_token", arguments: { token: "t2", updates: { hidden: false } } },
+      });
+      expect(client.modifyDocument).toHaveBeenCalledWith("Token", "t2", [{ hidden: false }], {
+        parentUuid: "Scene.sc1",
+      });
+    });
+
+    test("toggle_actor_condition adds an ActiveEffect", async () => {
+      const client = {
+        isConnected: () => true,
+        getDocument: jest.fn().mockResolvedValue({ _id: "a1", name: "Uchebe", effects: [] }),
+        createDocument: jest.fn().mockResolvedValue({ ok: true }),
+      } as any;
+      const handler = createToolHandler(client);
+      const response = await handler({
+        params: { name: "toggle_actor_condition", arguments: { name: "Uchebe", condition: "stun", active: true } },
+      });
+      expect(client.createDocument).toHaveBeenCalledWith(
+        "ActiveEffect",
+        [{ name: "Stunned", img: "icons/svg/daze.svg", statuses: ["stun"] }],
+        { parentUuid: "Actor.a1" }
+      );
+      expect((response as any).isError).toBeUndefined();
+    });
+
+    test("toggle_actor_condition removes matching effects", async () => {
+      const client = {
+        isConnected: () => true,
+        getDocument: jest.fn().mockResolvedValue({
+          _id: "a1",
+          name: "Uchebe",
+          effects: [
+            { _id: "e1", statuses: ["stun"] },
+            { _id: "e2", statuses: ["prone"] },
+          ],
+        }),
+        deleteDocument: jest.fn().mockResolvedValue({ ok: true }),
+      } as any;
+      const handler = createToolHandler(client);
+      await handler({
+        params: { name: "toggle_actor_condition", arguments: { _id: "a1", condition: "stun", active: false } },
+      });
+      expect(client.deleteDocument).toHaveBeenCalledWith("ActiveEffect", ["e1"], {
+        parentUuid: "Actor.a1",
+      });
+    });
+
+    test("toggle_actor_condition is idempotent", async () => {
+      const client = {
+        isConnected: () => true,
+        getDocument: jest.fn().mockResolvedValue({ _id: "a1", name: "Uchebe", effects: [{ _id: "e1", statuses: ["stun"] }] }),
+        createDocument: jest.fn(),
+      } as any;
+      const handler = createToolHandler(client);
+      const response = await handler({
+        params: { name: "toggle_actor_condition", arguments: { _id: "a1", condition: "stun", active: true } },
+      });
+      expect(client.createDocument).not.toHaveBeenCalled();
+      const body = JSON.parse((response as any).content[0].text);
+      expect(body.unchanged).toBe("already active");
+    });
+
+    test("toggle_actor_condition rejects unknown conditions", async () => {
+      const client = { isConnected: () => true } as any;
+      const handler = createToolHandler(client);
+      const response = await handler({
+        params: { name: "toggle_actor_condition", arguments: { _id: "a1", condition: "zzz", active: true } },
+      });
+      expect((response as any).isError).toBe(true);
+    });
+
+    test("request_player_roll posts an FFG pool chat message", async () => {
+      const client = {
+        isConnected: () => true,
+        getUserId: () => "bot1",
+        createDocument: jest.fn().mockResolvedValue({ ok: true }),
+      } as any;
+      const handler = createToolHandler(client);
+      const response = await handler({
+        params: {
+          name: "request_player_roll",
+          arguments: { description: "Test de Peur", difficulty: 2, challenge: 1, skill_name: "Discipline" },
+        },
+      });
+      expect(client.createDocument).toHaveBeenCalledWith("ChatMessage", [
+        expect.objectContaining({
+          author: "bot1",
+          content: expect.stringContaining("ffg-pool-to-player"),
+          flags: {
+            starwarsffg: expect.objectContaining({
+              dicePool: { difficulty: 2, challenge: 1 },
+              description: "Test de Peur",
+              roll: expect.objectContaining({ skillName: "Discipline" }),
+            }),
+          },
+        }),
+      ]);
+      expect((response as any).isError).toBeUndefined();
+    });
+
+    test("request_player_roll supports whisper", async () => {
+      const client = {
+        isConnected: () => true,
+        getUserId: () => "bot1",
+        createDocument: jest.fn().mockResolvedValue({ ok: true }),
+      } as any;
+      const handler = createToolHandler(client);
+      await handler({
+        params: {
+          name: "request_player_roll",
+          arguments: { description: "Perception", ability: 2, whisper_users: ["u1"] },
+        },
+      });
+      expect(client.createDocument).toHaveBeenCalledWith("ChatMessage", [
+        expect.objectContaining({ whisper: ["u1"] }),
+      ]);
+    });
+  });
 });
