@@ -1881,7 +1881,7 @@ export function createToolHandler(foundryClient: FoundryClient) {
           if (!sceneId) return order;
           const scene = await foundryClient.getDocument("scenes", { _id: sceneId }, { requestedFields: ["_id", "tokens"] });
           const tokens = ((scene?.tokens as Record<string, unknown>[] | undefined) ?? []);
-          return order.map((c) => ({
+          return order.map((c): Record<string, unknown> => ({
             ...c,
             name: c.name ?? tokens.find((t) => t._id === c.tokenId)?.name ?? null,
           }));
