@@ -532,6 +532,110 @@ describe("FoundryClient", () => {
       .resolves.toBeNull();
   });
 
+  describe("per-collection reads (socket get)", () => {
+    test("getDocuments uses the socket get with pushdown query, no world dump", async () => {
+      const { client } = createClient();
+      const send = jest
+        .spyOn(client as any, "sendModifyDocumentRequest")
+        .mockResolvedValue({ action: "get", result: [{ _id: "1", name: "A", type: "npc" }] });
+      const world = jest.spyOn(client, "requestWorldData");
+
+      const docs = await client.getDocuments("actors", {
+        where: { type: "npc", name__contains: "a" },
+      });
+
+      expect(send).toHaveBeenCalledWith(
+        "Actor",
+        "get",
+        { query: { type: "npc" }, action: "get", broadcast: false, index: false },
+        expect.any(String),
+        expect.any(Function),
+        "getCollection"
+      );
+      expect(world).not.toHaveBeenCalled();
+      expect(docs).toEqual([{ _id: "1", name: "A", type: "npc" }]);
+    });
+
+    test("getDocument pushes _id (and id) into the query", async () => {
+      const { client } = createClient();
+      const send = jest
+        .spyOn(client as any, "sendModifyDocumentRequest")
+        .mockResolvedValue({ action: "get", result: [{ _id: "2", name: "B" }] });
+
+      await expect(client.getDocument("items", { id: "2" }))
+        .resolves.toEqual({ _id: "2", name: "B" });
+      expect(send.mock.calls[0][2]).toMatchObject({ query: { _id: "2" } });
+
+      await client.getDocument("items", { name: "B" });
+      expect(send.mock.calls[1][2]).toMatchObject({ query: { name: "B" } });
+    });
+
+    test("falls back to the world dump when the socket get fails", async () => {
+      const { client, logger } = createClient();
+      jest
+        .spyOn(client as any, "sendModifyDocumentRequest")
+        .mockRejectedValue(new Error("boom"));
+      jest.spyOn(client, "requestWorldData").mockResolvedValue({
+        actors: [{ _id: "1", name: "A" }],
+      });
+
+      const docs = await client.getDocuments("actors");
+      expect(docs).toEqual([{ _id: "1", name: "A" }]);
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.stringContaining("falling back to world dump")
+      );
+    });
+
+    test("unknown collection goes straight to the world dump", async () => {
+      const { client } = createClient();
+      const send = jest.spyOn(client as any, "sendModifyDocumentRequest");
+      jest.spyOn(client, "requestWorldData").mockResolvedValue({
+        weird: [{ _id: "1", name: "A" }],
+      });
+
+      const docs = await client.getDocuments("weird");
+      expect(send).not.toHaveBeenCalled();
+      expect(docs).toEqual([{ _id: "1", name: "A" }]);
+    });
+
+    test("getSettings delegates to getDocuments('settings')", async () => {
+      const { client } = createClient();
+      const getDocs = jest.spyOn(client, "getDocuments").mockResolvedValue([{ _id: "s1", key: "core.x" } as any]);
+
+      const docs = await client.getSettings({ where: { key: "core.x" } });
+      expect(getDocs).toHaveBeenCalledWith("settings", { where: { key: "core.x" } });
+      expect(docs).toEqual([{ _id: "s1", key: "core.x" }]);
+    });
+
+    test("searchJournals reads the journal collection via socket get", async () => {
+      const { client } = createClient();
+      const send = jest.spyOn(client as any, "sendModifyDocumentRequest").mockResolvedValue({
+        action: "get",
+        result: [
+          {
+            _id: "j1",
+            name: "Notes",
+            pages: [{ _id: "p1", name: "Page", text: { content: "<p>Jerserra attaque</p>" } }],
+          },
+        ],
+      });
+      const world = jest.spyOn(client, "requestWorldData");
+
+      const hits = await client.searchJournals("jerserra");
+      expect(send).toHaveBeenCalledWith(
+        "JournalEntry",
+        "get",
+        expect.objectContaining({ query: {} }),
+        expect.any(String),
+        expect.any(Function),
+        "getCollection"
+      );
+      expect(world).not.toHaveBeenCalled();
+      expect(hits).toHaveLength(1);
+      expect(hits[0]).toMatchObject({ _id: "j1", match: "content" });
+    });
+  });
+
   test("modifyDocument builds operation", async () => {
     const { client } = createClient({ now: () => 123, WebSocketCtor: TestWebSocket });
     jest.spyOn(client as any, "sendModifyDocumentRequest")

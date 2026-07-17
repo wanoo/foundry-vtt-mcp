@@ -19,6 +19,7 @@ import {
   truncateDocuments,
 } from "./core/document-utils.js";
 import { buildDocumentOperation } from "./core/operations.js";
+import { COLLECTION_TO_TYPE, extractPushdownQuery } from "./core/collections.js";
 import {
   buildModifyDocumentMessage,
   ENGINE_PONG,
@@ -754,6 +755,56 @@ export class FoundryClient {
    * @param options.where - Filter documents by field values (AND logic for all conditions)
    * @returns Array of document objects
    */
+  /**
+   * Read the full documents of a world collection via the socket
+   * ("modifyDocument" action "get" — same channel as pack and Setting reads).
+   * Much lighter than the full world dump: only the requested type travels.
+   */
+  private async getCollection(
+    type: string,
+    query: Record<string, unknown> = {}
+  ): Promise<Record<string, unknown>[]> {
+    const response = await this.sendModifyDocumentRequest(
+      type,
+      "get",
+      { query, action: "get", broadcast: false, index: false },
+      `Timeout waiting for getCollection response (30s) for ${type}`,
+      (responseData) => responseData.action === "get",
+      "getCollection"
+    );
+    if (response.error) {
+      throw new Error(`Foundry error reading ${type}: ${JSON.stringify(response.error)}`);
+    }
+    return (response.result as Record<string, unknown>[]) ?? [];
+  }
+
+  /**
+   * Fetch a collection's documents, preferring the per-collection socket read.
+   * Falls back to the legacy full world dump if the socket read fails
+   * (unsupported type, exotic server) so behaviour degrades instead of breaking.
+   */
+  private async fetchCollection(
+    collection: string,
+    query: Record<string, unknown>
+  ): Promise<Record<string, unknown>[]> {
+    const type = COLLECTION_TO_TYPE[collection];
+    if (type) {
+      try {
+        return await this.getCollection(type, query);
+      } catch (error) {
+        this.logger.error(
+          `[FoundryClient] per-collection get failed for ${type} (${error instanceof Error ? error.message : error}), falling back to world dump`
+        );
+      }
+    }
+    const worldData = await this.requestWorldData();
+    const docs = worldData[collection] as Record<string, unknown>[] | undefined;
+    if (!docs || !Array.isArray(docs)) {
+      throw new Error(`Response does not contain ${collection} array`);
+    }
+    return docs;
+  }
+
   async getDocuments(
     collection: string,
     options?: {
@@ -766,12 +817,9 @@ export class FoundryClient {
     const requestedFields = options?.requestedFields ?? null;
     const where = options?.where ?? null;
 
-    const worldData = await this.requestWorldData();
-    const docs = worldData[collection] as Record<string, unknown>[] | undefined;
-
-    if (!docs || !Array.isArray(docs)) {
-      throw new Error(`Response does not contain ${collection} array`);
-    }
+    // Simple top-level equalities go to the server to shrink the payload;
+    // the FULL where filter is re-applied client-side below regardless.
+    const docs = await this.fetchCollection(collection, extractPushdownQuery(where));
 
     // Apply where filter first
     let filteredDocs = this.filterDocumentsByWhere(docs, where);
@@ -803,12 +851,10 @@ export class FoundryClient {
   ): Promise<Record<string, unknown> | null> {
     const requestedFields = options?.requestedFields ?? null;
 
-    const worldData = await this.requestWorldData();
-    const docs = worldData[collection] as Record<string, unknown>[] | undefined;
-
-    if (!docs || !Array.isArray(docs)) {
-      throw new Error(`Response does not contain ${collection} array`);
-    }
+    // Pushdown: fetch only the matching document(s). `id` is a Foundry `_id`.
+    const wanted = identifier._id ?? identifier.id;
+    const query = wanted ? { _id: wanted } : identifier.name ? { name: identifier.name } : {};
+    const docs = await this.fetchCollection(collection, query);
 
     // Find the document by id, _id, or name
     let doc: Record<string, unknown> | undefined;
@@ -978,21 +1024,8 @@ export class FoundryClient {
     requestedFields?: string[] | null;
     maxLength?: number | null;
   }): Promise<Record<string, unknown>[]> {
-    const response = await this.sendModifyDocumentRequest(
-      "Setting",
-      "get",
-      { query: {}, action: "get", broadcast: false, index: false },
-      "Timeout waiting for getSettings response (30s)",
-      (responseData) => responseData.action === "get",
-      "getSettings"
-    );
-    if (response.error) {
-      throw new Error(`Foundry error reading settings: ${JSON.stringify(response.error)}`);
-    }
-    let docs = (response.result as Record<string, unknown>[]) ?? [];
-    docs = filterDocumentsByWhere(docs, options?.where ?? null);
-    docs = docs.map((doc) => filterDocumentFields(doc, options?.requestedFields ?? null));
-    return truncateDocuments(docs, options?.maxLength ?? 0);
+    // Settings are a world collection like any other since per-collection reads.
+    return this.getDocuments("settings", options);
   }
 
   /**
@@ -1066,8 +1099,7 @@ export class FoundryClient {
     options?: { maxResults?: number | null }
   ): Promise<Record<string, unknown>[]> {
     const maxResults = options?.maxResults || 20;
-    const worldData = await this.requestWorldData();
-    const journals = (worldData.journal as Record<string, unknown>[] | undefined) ?? [];
+    const journals = await this.fetchCollection("journal", {});
     const needle = query.toLowerCase();
     const strip = (html: string) => html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
     const hits: Record<string, unknown>[] = [];
