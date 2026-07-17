@@ -19,12 +19,122 @@ describe("systems registry", () => {
 describe("module starwarsffg", () => {
   const handler = (client: any) => starwarsffgModule.createHandler(client);
 
-  test("expose ses 3 outils", () => {
+  test("expose ses 7 outils", () => {
     expect(starwarsffgModule.tools.map((t) => t.name)).toEqual([
       "request_player_roll",
       "roll_ffg_pool",
       "adjust_actor_stats",
+      "roll_actor_skill",
+      "adjust_destiny",
+      "grant_xp",
+      "apply_critical_injury",
     ]);
+  });
+
+  test("roll_actor_skill dérive le pool depuis la fiche et poste", async () => {
+    const actor = {
+      _id: "a1", name: "Pahas'Tis",
+      system: {
+        characteristics: { Willpower: { value: 0 } },
+        skills: { Vigilance: { rank: 0, characteristic: "Willpower" } },
+        attributes: {},
+      },
+      items: [
+        { name: "Twi’lek", type: "species", system: { attributes: { W: { mod: "Willpower", modtype: "Characteristic", value: 2 } } } },
+      ],
+    };
+    const client = {
+      getUserId: () => "bot1",
+      getDocument: jest.fn().mockResolvedValue(actor),
+      createDocument: jest.fn().mockResolvedValue({ ok: true }),
+    } as any;
+    const response = await handler(client)({
+      params: { name: "roll_actor_skill", arguments: { actor: "Pahas'Tis", skill: "vigilance", difficulty: 2 } },
+    });
+    const body = JSON.parse((response as any).content[0].text);
+    expect(body.derivation).toMatchObject({ characteristicValue: 2, ability: 2, proficiency: 0 });
+    expect(body.pool).toBe("🟩🟩 vs 🟪🟪");
+    expect(body.posted).toBe(true);
+    expect(client.createDocument).toHaveBeenCalledWith("ChatMessage", [
+      expect.objectContaining({ content: expect.stringContaining("Vigilance") }),
+    ]);
+  });
+
+  test("adjust_destiny spend_light convertit le point", async () => {
+    const client = {
+      getSettings: jest.fn().mockResolvedValue([
+        { _id: "s1", key: "starwarsffg.dPoolLight", value: "2" },
+        { _id: "s2", key: "starwarsffg.dPoolDark", value: "1" },
+      ]),
+      modifyDocument: jest.fn().mockResolvedValue({ ok: true }),
+      createDocument: jest.fn(),
+    } as any;
+    const response = await handler(client)({
+      params: { name: "adjust_destiny", arguments: { action: "spend_light" } },
+    });
+    const body = JSON.parse((response as any).content[0].text);
+    expect(body).toMatchObject({ light: 1, dark: 2, before: { light: 2, dark: 1 } });
+    expect(client.modifyDocument).toHaveBeenCalledWith("Setting", "s1", [{ value: "1" }]);
+    expect(client.modifyDocument).toHaveBeenCalledWith("Setting", "s2", [{ value: "2" }]);
+  });
+
+  test("adjust_destiny crée les settings absents (set)", async () => {
+    const client = {
+      getSettings: jest.fn().mockResolvedValue([]),
+      modifyDocument: jest.fn(),
+      createDocument: jest.fn().mockResolvedValue({ ok: true }),
+    } as any;
+    await handler(client)({
+      params: { name: "adjust_destiny", arguments: { action: "set", light: 3, dark: 1 } },
+    });
+    expect(client.createDocument).toHaveBeenCalledWith("Setting", [{ key: "starwarsffg.dPoolLight", value: "3" }]);
+    expect(client.createDocument).toHaveBeenCalledWith("Setting", [{ key: "starwarsffg.dPoolDark", value: "1" }]);
+  });
+
+  test("grant_xp cible les PJ par défaut et incrémente total+available", async () => {
+    const client = {
+      getDocuments: jest.fn().mockResolvedValue([
+        { _id: "a1", name: "Uchebe", system: { experience: { available: 10, total: 200 } } },
+      ]),
+      modifyDocument: jest.fn().mockResolvedValue({ ok: true }),
+    } as any;
+    const response = await handler(client)({
+      params: { name: "grant_xp", arguments: { amount: 15 } },
+    });
+    expect(client.getDocuments).toHaveBeenCalledWith("actors", expect.objectContaining({
+      where: { type: "character" },
+    }));
+    expect(client.modifyDocument).toHaveBeenCalledWith("Actor", "a1", [
+      { "system.experience.available": 25, "system.experience.total": 215 },
+    ]);
+    const body = JSON.parse((response as any).content[0].text);
+    expect(body.granted[0]).toMatchObject({ name: "Uchebe", available: 25, total: 215 });
+  });
+
+  test("apply_critical_injury : +10 par blessure existante, résout et attache l'item", async () => {
+    const client = {
+      getUserId: () => "bot1",
+      getDocument: jest.fn().mockImplementation(async (collection: string) =>
+        collection === "actors"
+          ? { _id: "a1", name: "Vendeur", items: [{ type: "criticalinjury", name: "Ancienne" }] }
+          : null
+      ),
+      getDocuments: jest.fn().mockResolvedValue([{
+        _id: "tb1", name: "🩸 Blessures critiques (d100)", formula: "1d100",
+        results: [{ range: [1, 200], description: "@UUID[Compendium.world.critical-injury-list.xYz123]{Sonné} · Facile" }],
+      }]),
+      getPackDocuments: jest.fn().mockResolvedValue([{ _id: "xYz123", name: "Sonné", type: "criticalinjury" }]),
+      createDocument: jest.fn().mockResolvedValue({ ok: true }),
+    } as any;
+    const response = await handler(client)({
+      params: { name: "apply_critical_injury", arguments: { actor: "Vendeur" } },
+    });
+    const body = JSON.parse((response as any).content[0].text);
+    expect(body.modifier).toBe(10); // 1 blessure existante
+    expect(body.roll).toBeGreaterThanOrEqual(11);
+    expect(body.attached).toEqual({ name: "Sonné" });
+    expect(client.getPackDocuments).toHaveBeenCalledWith("Item", "world.critical-injury-list", { query: { _id: "xYz123" } });
+    expect(client.createDocument).toHaveBeenCalledWith("Item", [expect.objectContaining({ name: "Sonné" })], { parentUuid: "Actor.a1" });
   });
 
   test("laisse passer les outils inconnus", async () => {
